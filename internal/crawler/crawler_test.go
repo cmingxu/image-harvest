@@ -139,7 +139,10 @@ func TestHarvest(t *testing.T) {
 }
 
 func TestSameSite(t *testing.T) {
-	cases := []struct{ host, seed string; want bool }{
+	cases := []struct {
+		host, seed string
+		want       bool
+	}{
 		{"www.ifeng.com", "ifeng.com", true},
 		{"news.ifeng.com", "ifeng.com", true},
 		{"ifeng.com", "ifeng.com", true},
@@ -155,7 +158,10 @@ func TestSameSite(t *testing.T) {
 }
 
 func TestServiceSubdomain(t *testing.T) {
-	cases := []struct{ host, seed string; want bool }{
+	cases := []struct {
+		host, seed string
+		want       bool
+	}{
 		{"mail.ifeng.com", "ifeng.com", true},
 		{"api.ifeng.com", "ifeng.com", true},
 		{"news.ifeng.com", "ifeng.com", false},

@@ -3,6 +3,7 @@ package harvestdb
 
 import (
 	"database/sql"
+	"os"
 	"sort"
 
 	_ "github.com/marcboeker/go-duckdb" // registers the "duckdb" driver
@@ -141,6 +142,25 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// OpenReadOnly opens an existing database for reading only. DuckDB allows many
+// read-only connections alongside a single writer, so the dashboard can serve
+// while a crawl process writes to the same file. If the file does not exist yet
+// it falls back to Open, which creates it.
+func OpenReadOnly(path string) (*Store, error) {
+	if _, err := os.Stat(path); err != nil {
+		return Open(path)
+	}
+	db, err := sql.Open("duckdb", path+"?access_mode=read_only")
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &Store{db: db}, nil
+}
+
 // InsertRun appends a run row and returns its id. DuckDB has no auto-increment
 // for plain INTEGER PRIMARY KEY, so ids come from MAX(id)+1.
 func (s *Store) InsertRun(r Run) (int64, error) {
@@ -253,7 +273,7 @@ func (s *Store) ReplaceCategories(kind string, roots []CategoryNode) error {
 		for _, c := range r.Children {
 			if _, err := tx.Exec(`INSERT INTO categories (id, kind, name, url, parent_id) VALUES (?,?,?,?,?)`, nextID, kind, c.Name, c.URL, rootIDs[len(rootIDs)-1]); err != nil {
 				return err
-		}
+			}
 			nextID++
 		}
 	}

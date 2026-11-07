@@ -240,7 +240,7 @@ func FetchPage(u string) (links, imgs []string) {
 	if err != nil {
 		return nil, nil
 	}
-	base := resp.Request.URL // final URL after redirects; links on ifeng.com 302 to www.ifeng.com
+	base := resp.Request.URL                            // final URL after redirects; links on ifeng.com 302 to www.ifeng.com
 	host := strings.TrimPrefix(base.Hostname(), "www.") // match seed domain + subdomains
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {

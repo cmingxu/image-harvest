@@ -7,8 +7,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"image-harvest/internal/crawler"
 	"image-harvest/internal/discover"
@@ -25,6 +28,7 @@ func main() {
 	quality := flag.Int("quality", 85, "JPEG quality for webp->jpg conversion")
 	dbPath := flag.String("db", "harvest.duckdb", "duckdb metadata file (empty disables)")
 	rehash := flag.Bool("rehash", false, "backfill perceptual hashes for already-saved images, then exit")
+	requireNetFS := flag.Bool("require-netfs", false, "refuse to run unless -out is on a network filesystem (cifs/nfs), so a missing NAS mount cannot fill the local disk")
 	doDiscover := flag.Bool("discover", false, "probe candidate domains from a top-N list and rank them in the db, then exit")
 	doCategories := flag.Bool("categories", false, "refresh the nipic.com category tree in the db, then exit")
 	list := flag.String("list", discover.DefaultList, "domain list: local file path or URL (.zip supported)")
@@ -68,13 +72,10 @@ func main() {
 		os.Exit(2)
 	}
 
-	var store *harvestdb.Store
-	if *dbPath != "" {
-		if s, err := harvestdb.Open(*dbPath); err != nil {
-			fmt.Fprintf(os.Stderr, "warn: duckdb unavailable (%v); skipping metadata\n", err)
-		} else {
-			store = s
-			defer store.Close()
+	if *requireNetFS {
+		if err := checkNetFS(*out); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
 		}
 	}
 
@@ -86,6 +87,19 @@ func main() {
 
 	fmt.Printf("crawled %d pages, found %d unique image candidates\n", res.Pages, res.Candidates)
 	fmt.Printf("saved %d to %s, skipped %d (%ds)\n", res.Saved, res.Dir, res.Skipped, int(res.Duration.Seconds()))
+
+	// The database is opened only now: a crawl holds no lock while it runs, so a
+	// dashboard serving the same file stays responsive. Opening can still lose a
+	// race with a dashboard request, hence the short retry loop.
+	var store *harvestdb.Store
+	if *dbPath != "" {
+		if s, err := openWithRetry(*dbPath, 20); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: duckdb unavailable (%v); skipping metadata\n", err)
+		} else {
+			store = s
+			defer store.Close()
+		}
+	}
 
 	if store != nil {
 		runID, err := store.InsertRun(harvestdb.Run{
@@ -177,4 +191,56 @@ func parseRes(s string) (int, int, error) {
 		return 0, 0, fmt.Errorf("expected WxH, got %q", s)
 	}
 	return w, h, nil
+}
+
+// openWithRetry opens the DuckDB store, retrying briefly: a dashboard request
+// against the same file holds the lock for a few milliseconds at a time.
+func openWithRetry(path string, attempts int) (*harvestdb.Store, error) {
+	var err error
+	for i := 0; i < attempts; i++ {
+		var s *harvestdb.Store
+		if s, err = harvestdb.Open(path); err == nil {
+			return s, nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return nil, err
+}
+
+// netFS is the set of filesystem types that count as "the NAS is mounted".
+var netFS = map[string]bool{"cifs": true, "smb3": true, "nfs": true, "nfs4": true}
+
+// checkNetFS verifies that out (or its nearest existing ancestor) sits on a
+// network filesystem. It exists so a forgotten mount cannot silently write the
+// harvested images onto the local disk.
+func checkNetFS(out string) error {
+	abs, err := filepath.Abs(out)
+	if err != nil {
+		return err
+	}
+	probe := abs
+	for {
+		if _, err := os.Stat(probe); err == nil {
+			break
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			break
+		}
+		probe = parent
+	}
+	b, err := exec.Command("findmnt", "-n", "-o", "FSTYPE,TARGET", "-T", probe).Output()
+	if err != nil {
+		return fmt.Errorf("cannot determine filesystem of %s: %v", probe, err)
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) < 2 {
+		return fmt.Errorf("cannot determine filesystem of %s", probe)
+	}
+	if !netFS[fields[0]] {
+		return fmt.Errorf("%s is on %q (%s) — refusing to write harvested images to local disk; mount the NAS first",
+			abs, fields[0], fields[1])
+	}
+	fmt.Printf("media root %s on %s (%s)\n", abs, fields[1], fields[0])
+	return nil
 }

@@ -44,7 +44,11 @@ func TestRouter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := NewRouter(store, dir)
+	// the real server opens a short-lived read-only connection per request;
+	// the test hands out the shared store instead.
+	r := NewRouter(Opener(func() (*harvestdb.Store, func(), error) {
+		return store, func() {}, nil
+	}), dir)
 	srv := httptest.NewServer(r)
 	defer srv.Close()
 

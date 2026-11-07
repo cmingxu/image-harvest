@@ -3,7 +3,7 @@ BIN ?= bin
 WEB_DIR ?= web
 DOMAIN ?= ifeng.com
 
-.PHONY: all build build-web test vet run-harvest run-server clean
+.PHONY: all build build-web test vet run-harvest run-server clean deploy crawl
 
 all: build build-web
 
@@ -32,3 +32,10 @@ run-server: build build-web
 
 clean:
 	rm -rf $(BIN) webui/dist web/node_modules
+
+# remote deploy (systemd user unit) and remote crawl against the NAS media root
+deploy:
+	./scripts/deploy.sh
+
+crawl:
+	./scripts/crawl.sh $(ARGS)

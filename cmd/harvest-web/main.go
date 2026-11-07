@@ -19,11 +19,15 @@ func main() {
 	out := flag.String("out", ".", "harvest output directory (media root)")
 	flag.Parse()
 
-	store, err := harvestdb.Open(*dbPath)
-	if err != nil {
-		log.Fatalf("open %s: %v", *dbPath, err)
+	// The dashboard only reads. Each request opens its own short-lived read-only
+	// connection so a crawl run can take the single DuckDB write lock in between.
+	open := func() (*harvestdb.Store, func(), error) {
+		store, err := harvestdb.OpenReadOnly(*dbPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		return store, func() { store.Close() }, nil
 	}
-	defer store.Close()
 
 	absOut, err := filepath.Abs(*out)
 	if err != nil {
@@ -33,7 +37,16 @@ func main() {
 		log.Fatalf("out dir %s not found", *out)
 	}
 
-	r := web.NewRouter(store, absOut)
+	// create the database up front so read-only opens always have a file
+	if _, statErr := os.Stat(*dbPath); statErr != nil {
+		if s, err := harvestdb.Open(*dbPath); err == nil {
+			s.Close()
+		} else {
+			log.Printf("could not create %s: %v", *dbPath, err)
+		}
+	}
+
+	r := web.NewRouter(web.Opener(open), absOut)
 	webui.Register(r)
 	log.Printf("harvest-web on %s (db=%s out=%s)", *addr, *dbPath, absOut)
 	if err := r.Run(*addr); err != nil {
