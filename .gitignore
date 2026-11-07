@@ -1,0 +1,49 @@
+# ---- build artifacts ----
+/bin/
+/image-harvest
+/harvest-web
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+
+# ---- frontend ----
+/web/node_modules/
+/web/dist/
+/web/dist-ssr/
+/webui/dist/
+node_modules/
+dist/
+*.local
+
+# ---- crawl output & data ----
+/harvest.duckdb
+/harvest.duckdb.wal
+/harvest.duckdb.tmp/
+/top-1m.csv
+20*-*-*-*/
+.cache/
+
+# ---- screenshots / scratch ----
+/.shots/
+
+# ---- logs ----
+*.log
+logs/
+
+# ---- env & secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- editors / OS ----
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.sw?
+*~
