@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"image-harvest/internal/harvestdb"
 )
@@ -74,18 +75,38 @@ func TestRunScoring(t *testing.T) {
 	defer store.Close()
 
 	// probe dense, sparse, and one unreachable domain from a "top list"
-	domains, err := Run(store, []string{srvD.URL, srvS.URL, "http://127.0.0.1:1"}, 2, 10, 0)
+	sink := func(batch []harvestdb.Domain) error {
+		for _, d := range batch {
+			if _, err := store.UpsertDomain(d); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	domains, err := Run(sink, []string{srvD.URL, srvS.URL, "http://127.0.0.1:1"},
+		Options{Workers: 2, Limit: 10, Timeout: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(domains) != 3 {
-		t.Fatalf("want 3 domains, got %d: %+v", len(domains), domains)
+		t.Fatalf("want 3 probed domains, got %d: %+v", len(domains), domains)
 	}
 	if domains[0].Domain != srvD.URL {
 		t.Fatalf("want dense site ranked first, got %+v", domains[0])
 	}
-	if domains[2].Score != 0 || domains[2].Note == "" {
-		t.Fatalf("unreachable domain should be recorded as failure, got %+v", domains[2])
+
+	// only reachable domains become candidates in the database
+	stored, err := store.ListDomains()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 2 {
+		t.Fatalf("want 2 stored candidates (unreachable dropped), got %d: %+v", len(stored), stored)
+	}
+	for _, d := range stored {
+		if d.Domain == "http://127.0.0.1:1" {
+			t.Fatalf("unreachable domain must not be stored: %+v", d)
+		}
 	}
 }
 

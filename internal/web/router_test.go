@@ -48,7 +48,9 @@ func TestRouter(t *testing.T) {
 	// the test hands out the shared store instead.
 	r := NewRouter(Opener(func() (*harvestdb.Store, func(), error) {
 		return store, func() {}, nil
-	}), dir)
+	}), dir, func() Meta {
+		return Meta{DBPath: "h.duckdb", MediaRoot: dir, Config: map[string]string{"depth": "2"}}
+	})
 	srv := httptest.NewServer(r)
 	defer srv.Close()
 

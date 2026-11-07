@@ -22,6 +22,24 @@ import (
 // milliseconds so a crawl run can grab the write lock in between.
 type Opener func() (*harvestdb.Store, func(), error)
 
+// pageParams reads ?limit/?offset/?page, clamps them and defaults sensibly.
+func pageParams(c *gin.Context, defLimit, maxLimit int) (limit, offset int) {
+	limit, _ = strconv.Atoi(c.DefaultQuery("limit", strconv.Itoa(defLimit)))
+	if limit <= 0 {
+		limit = defLimit
+	}
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+	if p, err := strconv.Atoi(c.Query("page")); err == nil && p > 1 {
+		offset = (p - 1) * limit
+	}
+	if o, err := strconv.Atoi(c.Query("offset")); err == nil && o > 0 {
+		offset = o
+	}
+	return limit, offset
+}
+
 // withStore wraps a handler so it runs with a fresh store and always releases it.
 func withStore(open Opener, h func(*gin.Context, *harvestdb.Store)) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -35,18 +53,33 @@ func withStore(open Opener, h func(*gin.Context, *harvestdb.Store)) gin.HandlerF
 	}
 }
 
+// Meta is the runtime configuration and dataset summary shown on the dashboard.
+type Meta struct {
+	DBPath    string            `json:"db_path"`
+	DBSize    int64             `json:"db_size_bytes"`
+	MediaRoot string            `json:"media_root"`
+	Config    map[string]string `json:"config"`
+	Stats     harvestdb.Stats   `json:"stats"`
+}
+
 // NewRouter builds the API + media routes on top of the DuckDB store.
-func NewRouter(open Opener, out string) *gin.Engine {
+func NewRouter(open Opener, out string, meta func() Meta) *gin.Engine {
 	r := gin.Default()
 	api := r.Group("/api")
 
 	api.GET("/runs", withStore(open, func(c *gin.Context, store *harvestdb.Store) {
-		runs, err := store.ListRuns()
+		limit, offset := pageParams(c, 50, 500)
+		runs, err := store.ListRunsPage(limit, offset)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"runs": runs})
+		total, err := store.CountRuns()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"runs": runs, "total": total, "limit": limit, "offset": offset})
 	}))
 
 	api.GET("/runs/:id", withStore(open, func(c *gin.Context, store *harvestdb.Store) {
@@ -73,12 +106,18 @@ func NewRouter(open Opener, out string) *gin.Engine {
 		if filter != "saved" && filter != "skipped" && filter != "all" {
 			filter = "saved"
 		}
-		imgs, err := store.ListImages(id, filter)
+		limit, offset := pageParams(c, 60, 500)
+		imgs, err := store.ListImagesPage(id, filter, limit, offset)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"images": imgs})
+		total, err := store.CountImages(id, filter)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"images": imgs, "total": total, "limit": limit, "offset": offset})
 	}))
 
 	api.GET("/images/:id/similar", withStore(open, func(c *gin.Context, store *harvestdb.Store) {
@@ -107,12 +146,30 @@ func NewRouter(open Opener, out string) *gin.Engine {
 	}))
 
 	api.GET("/domains", withStore(open, func(c *gin.Context, store *harvestdb.Store) {
-		domains, err := store.ListDomains()
+		limit, offset := pageParams(c, 50, 500)
+		domains, err := store.ListDomainsPage(limit, offset)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"domains": domains})
+		total, err := store.CountDomains()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"domains": domains, "total": total, "limit": limit, "offset": offset})
+	}))
+
+	// metadata: dataset stats + the crawl configuration in force
+	api.GET("/meta", withStore(open, func(c *gin.Context, store *harvestdb.Store) {
+		m := meta()
+		st, err := store.Stats()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		m.Stats = st
+		c.JSON(http.StatusOK, m)
 	}))
 
 	api.GET("/categories", withStore(open, func(c *gin.Context, store *harvestdb.Store) {

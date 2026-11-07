@@ -21,11 +21,11 @@ import (
 
 func main() {
 	depth := flag.Int("depth", 2, "link depth to crawl (0 = seed page only)")
-	minRes := flag.String("min", "0x0", "minimum image resolution WxH")
+	minRes := flag.String("min", "1200x800", "minimum image resolution WxH — only high-resolution images are downloaded")
 	workers := flag.Int("workers", 4, "concurrent fetches")
 	maxPages := flag.Int("maxpages", 500, "stop crawling after this many pages")
 	out := flag.String("out", ".", "output directory")
-	quality := flag.Int("quality", 85, "JPEG quality for webp->jpg conversion")
+	quality := flag.Int("quality", 92, "JPEG quality for webp->jpg conversion")
 	dbPath := flag.String("db", "harvest.duckdb", "duckdb metadata file (empty disables)")
 	rehash := flag.Bool("rehash", false, "backfill perceptual hashes for already-saved images, then exit")
 	requireNetFS := flag.Bool("require-netfs", false, "refuse to run unless -out is on a network filesystem (cifs/nfs), so a missing NAS mount cannot fill the local disk")
@@ -36,10 +36,11 @@ func main() {
 	refresh := flag.Bool("refresh", false, "re-download the domain list even if cached")
 	discoverLimit := flag.Int("discover-limit", 2000, "number of list entries to probe")
 	discoverOffset := flag.Int("discover-offset", 0, "skip this many list entries before probing")
+	discoverTimeout := flag.Duration("discover-timeout", discover.DefaultTimeout, "per-domain probe timeout (short = fast sweep of the whole list)")
 	flag.Parse()
 
 	if *doDiscover {
-		if err := discoverDomains(*dbPath, *list, *listCache, *refresh, *discoverLimit, *discoverOffset, *workers); err != nil {
+		if err := discoverDomains(*dbPath, *list, *listCache, *refresh, *discoverLimit, *discoverOffset, *workers, *discoverTimeout); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -143,23 +144,53 @@ func refreshCategories(dbPath string) error {
 	return nil
 }
 
-func discoverDomains(dbPath, list, cachePath string, refresh bool, limit, offset, workers int) error {
-	store, err := harvestdb.Open(dbPath)
-	if err != nil {
+func discoverDomains(dbPath, list, cachePath string, refresh bool, limit, offset, workers int, timeout time.Duration) error {
+	// no long-lived store here: the probing phase must not hold the DuckDB lock
+	if s, err := openWithRetry(dbPath, 5); err != nil {
 		return err
+	} else {
+		s.Close() // make sure the schema exists before the first batch write
 	}
-	defer store.Close()
 	cands, err := discover.LoadList(list, cachePath, refresh)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("loaded %d candidate domains\n", len(cands))
-	domains, err := discover.Run(store, cands, workers, limit, offset)
+
+	// write in batches, each on its own short-lived connection, so the dashboard
+	// can keep reading the same DuckDB file while discovery runs
+	sink := func(batch []harvestdb.Domain) error {
+		s, err := openWithRetry(dbPath, 20)
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		for _, d := range batch {
+			if _, err := s.UpsertDomain(d); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	domains, err := discover.Run(sink, cands, discover.Options{
+		Workers: workers, Limit: limit, Offset: offset, Timeout: timeout,
+	})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("\ntop %d of %d ranked domains:\n", min(20, len(domains)), len(domains))
-	for i, d := range domains[:min(20, len(domains))] {
+
+	reachable := 0
+	for _, d := range domains {
+		if d.ImgDensity > 0 {
+			reachable++
+		}
+	}
+	top := min(20, len(domains))
+	fmt.Printf("\n%d reachable candidates stored in %s (probe timeout %s); top %d ranked:\n",
+		reachable, dbPath, timeout, top)
+	for i := 0; i < top; i++ {
+		d := domains[i]
 		fmt.Printf("%2d. %-28s score=%6.1f density=%-3d hi-res=%2d%% %s\n",
 			i+1, d.Domain, d.Score, d.ImgDensity, int(d.HiResRatio*100), d.Note)
 	}

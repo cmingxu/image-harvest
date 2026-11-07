@@ -46,10 +46,45 @@ func main() {
 		}
 	}
 
-	r := web.NewRouter(web.Opener(open), absOut)
+	absDB, err := filepath.Abs(*dbPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// crawl settings come from the environment (systemd EnvironmentFile), so the
+	// dashboard can show the exact configuration the crawls run with
+	meta := func() web.Meta {
+		var size int64
+		if fi, err := os.Stat(absDB); err == nil {
+			size = fi.Size()
+		}
+		return web.Meta{
+			DBPath:    absDB,
+			DBSize:    size,
+			MediaRoot: absOut,
+			Config: map[string]string{
+				"depth":          env("DEPTH", "2"),
+				"min_res":        env("MIN_RES", "1200x800"),
+				"quality":        env("QUALITY", "92"),
+				"max_pages":      env("MAX_PAGES", "200"),
+				"workers":        env("WORKERS", "4"),
+				"discover_limit": env("DISCOVER_LIMIT", "2000"),
+			},
+		}
+	}
+
+	r := web.NewRouter(web.Opener(open), absOut, meta)
 	webui.Register(r)
 	log.Printf("harvest-web on %s (db=%s out=%s)", *addr, *dbPath, absOut)
 	if err := r.Run(*addr); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// env returns the environment value or a fallback.
+func env(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }

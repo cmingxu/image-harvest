@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily image-harvest domain discovery
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=30m
+Persistent=true
+Unit=image-harvest-discover.service
+
+[Install]
+WantedBy=timers.target

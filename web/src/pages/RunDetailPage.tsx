@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
+import Pagination from '../components/Pagination'
 import { Card, CardContent } from '../components/ui/card'
 
 interface Run {
@@ -48,6 +49,9 @@ export default function RunDetailPage() {
   const [run, setRun] = useState<Run | null>(null)
   const [images, setImages] = useState<Image[]>([])
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('saved')
+  const [page, setPage] = useState(1)
+  const [limit, setLimit] = useState(60)
+  const [total, setTotal] = useState(0)
   const [selected, setSelected] = useState<Image | null>(null)
   const [similar, setSimilar] = useState<Similar[]>([])
   const [simLoading, setSimLoading] = useState(false)
@@ -61,11 +65,14 @@ export default function RunDetailPage() {
   }, [id])
 
   useEffect(() => {
-    fetch(`/api/runs/${id}/images?skipped=${filter}`)
+    fetch(`/api/runs/${id}/images?skipped=${filter}&page=${page}&limit=${limit}`)
       .then((r) => r.json())
-      .then((d) => setImages(d.images ?? []))
+      .then((d) => {
+        setImages(d.images ?? [])
+        setTotal(d.total ?? 0)
+      })
       .catch((e) => setError(String(e)))
-  }, [id, filter])
+  }, [id, filter, page, limit])
 
   if (error) {
     return <p className="text-sm text-red-500">{error}</p>
@@ -102,11 +109,14 @@ export default function RunDetailPage() {
         <Stat label="Images downloaded" value={String(run.images_downloaded)} />
       </div>
 
-      <div className="flex gap-2">
+      <div className="flex items-center gap-2">
         {FILTERS.map((f) => (
           <button
             key={f}
-            onClick={() => setFilter(f)}
+            onClick={() => {
+              setFilter(f)
+              setPage(1)
+            }}
             className={`rounded-md px-3 py-1 text-sm transition-colors ${
               filter === f ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground hover:bg-muted/70'
             }`}
@@ -114,6 +124,7 @@ export default function RunDetailPage() {
             {f}
           </button>
         ))}
+        <span className="ml-auto text-sm text-muted-foreground">{total.toLocaleString()} images</span>
       </div>
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-4">
@@ -155,6 +166,19 @@ export default function RunDetailPage() {
         )}
       </div>
 
+      <Pagination
+        page={page}
+        limit={limit}
+        total={total}
+        onPage={setPage}
+        onLimit={(l) => {
+          setLimit(l)
+          setPage(1)
+        }}
+        label="images"
+        pageSizes={[24, 60, 120, 240]}
+      />
+
       {selected && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
@@ -180,9 +204,15 @@ export default function RunDetailPage() {
               alt={selected.url}
               className="mx-auto mt-2 max-h-[50vh] rounded object-contain"
             />
-            <div className="mt-2 text-xs text-muted-foreground">
-              {selected.width}×{selected.height} · {selected.ext} ·{' '}
-              {(selected.size_bytes / 1048576).toFixed(2)} MB
+            <div className="mt-2 space-y-0.5 text-xs text-muted-foreground">
+              <div>
+                {selected.width}×{selected.height} px · {selected.ext} ·{' '}
+                {(selected.size_bytes / 1048576).toFixed(2)} MB · saved as{' '}
+                <code className="rounded bg-muted px-1">{selected.saved_path}</code>
+              </div>
+              <div>
+                source <a className="text-primary hover:underline" href={selected.url} target="_blank" rel="noreferrer">{selected.url}</a>
+              </div>
             </div>
 
             <h3 className="mt-4 text-sm font-semibold">Similar images</h3>

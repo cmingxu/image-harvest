@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
+import Pagination from '../components/Pagination'
 import {
   Table,
   TableBody,
@@ -22,14 +23,20 @@ interface Run {
 
 export default function RunsPage() {
   const [runs, setRuns] = useState<Run[]>([])
+  const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
+  const [limit, setLimit] = useState(50)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    fetch('/api/runs')
+    fetch(`/api/runs?page=${page}&limit=${limit}`)
       .then((r) => r.json())
-      .then((d) => setRuns(d.runs ?? []))
+      .then((d) => {
+        setRuns(d.runs ?? [])
+        setTotal(d.total ?? 0)
+      })
       .catch((e) => setError(String(e)))
-  }, [])
+  }, [page, limit])
 
   if (error) {
     return <p className="text-sm text-red-500">{error}</p>
@@ -37,7 +44,10 @@ export default function RunsPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold">Crawl runs</h1>
+      <div className="flex items-baseline justify-between">
+        <h1 className="text-xl font-semibold">Crawl runs</h1>
+        <span className="text-sm text-muted-foreground">{total.toLocaleString()} total</span>
+      </div>
       <Table>
         <TableHeader>
           <TableRow>
@@ -75,6 +85,17 @@ export default function RunsPage() {
           )}
         </TableBody>
       </Table>
+      <Pagination
+        page={page}
+        limit={limit}
+        total={total}
+        onPage={setPage}
+        onLimit={(l) => {
+          setLimit(l)
+          setPage(1)
+        }}
+        label="runs"
+      />
     </div>
   )
 }

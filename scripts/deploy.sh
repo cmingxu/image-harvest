@@ -14,6 +14,7 @@
 #   $APP_DIR/logs   service logs
 #   $MEDIA_ROOT     harvested images — MUST be a network mount (NAS), never
 #                   the remote's local disk. Enforced below and in the unit.
+#   $APP_DIR/config.env  crawl settings shared by the web + discovery units
 #
 # The service is a systemd *user* unit, so no sudo is required.
 set -euo pipefail
@@ -25,6 +26,19 @@ ADDR=${ADDR:-:$PORT}
 GOPROXY=${GOPROXY:-https://goproxy.cn,direct}
 SERVICE=${SERVICE:-image-harvest-web}
 MEDIA_ROOT=${MEDIA_ROOT:-/mnt/nas/Photos}       # NAS path for harvested images
+
+# crawl settings, written to config.env and used by the units + crawl.sh
+DEPTH=${DEPTH:-2}                               # link depth
+MIN_RES=${MIN_RES:-1200x800}                    # only high-resolution images
+QUALITY=${QUALITY:-92}                          # JPEG quality for webp->jpg
+MAX_PAGES=${MAX_PAGES:-200}
+WORKERS=${WORKERS:-4}
+DISCOVER_LIMIT=${DISCOVER_LIMIT:-2000}          # top-1M entries probed per run
+DISCOVER_OFFSET=${DISCOVER_OFFSET:-0}
+PROBE_TIMEOUT=${PROBE_TIMEOUT:-4s}              # per-domain probe budget
+LIST=${LIST:-https://s3-us-west-1.amazonaws.com/umbrella-static/top-1m.csv.zip}
+TIMER=${TIMER:-1}                               # install the daily discovery timer
+LIST_SYNC=${LIST_SYNC:-1}                       # upload local top-1m.csv if present
 NET_FS_TYPES=${NET_FS_TYPES:-cifs|smb3|nfs|nfs4}
 BUILD=${BUILD:-1}
 DRY_RUN=0
@@ -119,6 +133,40 @@ else
 fi
 
 # ---------------------------------------------------------------- unit file
+# ---------------------------------------------------------------- config.env
+log "writing crawl config: $REMOTE_ABS/config.env"
+CONFIG_ENV=$(cat <<EOF
+# managed by scripts/deploy.sh — edit defaults there, not here
+PORT=$PORT
+MEDIA_ROOT=$MEDIA_ROOT
+DEPTH=$DEPTH
+MIN_RES=$MIN_RES
+QUALITY=$QUALITY
+MAX_PAGES=$MAX_PAGES
+WORKERS=$WORKERS
+DISCOVER_LIMIT=$DISCOVER_LIMIT
+DISCOVER_OFFSET=$DISCOVER_OFFSET
+PROBE_TIMEOUT=$PROBE_TIMEOUT
+LIST=$LIST
+EOF
+)
+if [ "$DRY_RUN" = 1 ]; then
+  printf '  [dry-run] config.env: depth=%s min=%s quality=%s pages=%s workers=%s discover_limit=%s probe_timeout=%s\n' \
+    "$DEPTH" "$MIN_RES" "$QUALITY" "$MAX_PAGES" "$WORKERS" "$DISCOVER_LIMIT" "$PROBE_TIMEOUT"
+else
+  printf '%s\n' "$CONFIG_ENV" | ssh "$DEPLOY_HOST" "cat > '$REMOTE_ABS/config.env'"
+fi
+
+# optional: push the local top-1M list so discovery doesn't re-download it
+if [ "$LIST_SYNC" = 1 ] && [ -f "$ROOT/top-1m.csv" ] && [ "$DRY_RUN" = 0 ]; then
+  if ssh "$DEPLOY_HOST" "test -f '$REMOTE_ABS/data/top-1m.csv'"; then
+    log "top-1m.csv already on remote, skipping upload"
+  else
+    log "uploading local top-1m.csv ($(du -h "$ROOT/top-1m.csv" | cut -f1)) to remote data/"
+    scp -q "$ROOT/top-1m.csv" "$DEPLOY_HOST:$REMOTE_ABS/data/top-1m.csv"
+  fi
+fi
+
 log "installing systemd user unit: $SERVICE.service"
 UNIT_LOCAL="$ROOT/deploy/$SERVICE.service"
 render_unit() {
@@ -134,6 +182,11 @@ else
   render_unit > /tmp/"$SERVICE".service
   ssh "$DEPLOY_HOST" "mkdir -p ~/.config/systemd/user"
   scp -q /tmp/"$SERVICE".service "$DEPLOY_HOST:.config/systemd/user/$SERVICE.service"
+
+  # discovery service + daily timer
+  sed -e "s|__APP_DIR__|$REMOTE_ABS|g" "$ROOT/deploy/image-harvest-discover.service" > /tmp/image-harvest-discover.service
+  scp -q /tmp/image-harvest-discover.service "$DEPLOY_HOST:.config/systemd/user/image-harvest-discover.service"
+  scp -q "$ROOT/deploy/image-harvest-discover.timer" "$DEPLOY_HOST:.config/systemd/user/image-harvest-discover.timer"
 fi
 
 # ---------------------------------------------------------------- start it
@@ -144,6 +197,16 @@ rsh "export XDG_RUNTIME_DIR=/run/user/\$(id -u)
   systemctl --user restart $SERVICE.service
   sleep 2
   systemctl --user --no-pager --lines=20 status $SERVICE.service || true"
+
+log "discovery timer"
+if [ "$TIMER" = 1 ]; then
+  rsh "export XDG_RUNTIME_DIR=/run/user/\$(id -u)
+    systemctl --user daemon-reload
+    systemctl --user enable --now image-harvest-discover.timer
+    systemctl --user list-timers image-harvest-discover.timer --no-pager | head -3"
+else
+  rsh "export XDG_RUNTIME_DIR=/run/user/\$(id -u); systemctl --user disable --now image-harvest-discover.timer || true"
+fi
 
 # linger so the unit survives logout / starts at boot (needs polkit auth once)
 rsh "loginctl enable-linger \$(id -u) 2>/dev/null || echo '   note: loginctl enable-linger needs auth — run it once by hand for boot-start'"

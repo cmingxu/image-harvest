@@ -15,9 +15,25 @@ make test
 ## Crawl
 
 ```sh
-bin/image-harvest [-depth 2] [-min 800x600] [-workers 4] [-maxpages 500] \
-                  [-out .] [-quality 85] [-db harvest.duckdb] <domain>
+bin/image-harvest [-depth 2] [-min 1200x800] [-workers 4] [-maxpages 200] \
+                  [-out .] [-quality 92] [-db harvest.duckdb] <domain>
 ```
+
+Only high-resolution images are kept: candidates smaller than `-min`
+(default **1200x800**) are rejected before download, and webp is re-encoded at
+`-quality` (default **92**). Per-domain link depth is `-depth` (0 = seed page
+only).
+
+```sh
+bin/image-harvest -discover [-discover-limit 2000] [-discover-offset 0] \
+                  [-list <file|url>] [-refresh] [-workers 4]
+```
+
+Discovery walks the top-1M list, probes each domain and stores **only the
+network-reachable ones** in the `domains` table (score = image density ×
+(1 + hi-res ratio)), so the dashboard's Discover page is a list of usable crawl
+targets. Results are written in small batches on short-lived connections, so a
+long discovery run never blocks the dashboard.
 
 - BFS crawl, seed domain + subdomains; service subdomains (mail., api., …)
   are skipped and content-free subdomains are abandoned after one probe page.
@@ -32,6 +48,12 @@ bin/harvest-web -db harvest.duckdb -out .   # http://localhost:8080
 ```
 
 - Runs list: domain, time, depth, pages visited, images downloaded.
+- All list views are paginated server-side (`?page=&limit=`, capped at 500) and
+  return `total`, so the UI can page through runs, images and the candidate
+  domain list (hundreds of thousands of rows after a full sweep).
+- **Metadata** page: DuckDB path/size, media root, saved/skipped image counts,
+  total bytes, candidate-domain counts, last crawl/discovery, and the effective
+  crawl config (depth, min resolution, quality, pages, workers).
 - Run detail: image grid with metadata; click an image for a detail modal
   showing visually similar images (dHash, Hamming distance ≤ 10).
 
@@ -55,6 +77,18 @@ automatically through `GOPROXY` (`https://goproxy.cn,direct` by default).
 | `APP_DIR` | `apps/image-harvest` | install dir, relative to remote `$HOME` |
 | `PORT` | `8088` | dashboard port |
 | `MEDIA_ROOT` | `/mnt/nas/Photos` | where images are written — **must be a NAS mount** |
+| `DEPTH` | `2` | crawl depth |
+| `MIN_RES` | `1200x800` | minimum resolution; smaller images are skipped |
+| `QUALITY` | `92` | JPEG quality for webp→jpg |
+| `MAX_PAGES` | `200` | page cap per crawl |
+| `WORKERS` | `4` | concurrent fetches |
+| `DISCOVER_LIMIT` | `2000` | top-1M entries probed per discovery run |
+| `DISCOVER_OFFSET` | `0` | starting rank (the timer rotates it by day) |
+| `TIMER` | `1` | install/enable the daily discovery timer |
+
+`config.env` on the host is the single source of truth for these; the dashboard
+shows them on the **Metadata** page. Edit the defaults in `scripts/deploy.sh`
+(or override per deploy: `DEPTH=1 MIN_RES=1600x1200 ./scripts/deploy.sh`).
 
 Remote layout:
 
@@ -81,13 +115,23 @@ Three guards, all on by default:
    when `-out` is not on a network filesystem, instead of silently filling the
    remote's disk.
 
-### Crawl on the remote
+### Crawl / discover on the remote
 
 ```sh
-./scripts/crawl.sh -depth 2 -maxpages 200 -min 800x600 www.nipic.com
+./scripts/crawl.sh www.nipic.com                            # uses config.env
+./scripts/crawl.sh -depth 1 -min 1600x1200 example.com      # per-run override
+./scripts/discover.sh -discover-limit 500                   # refresh candidates
+./scripts/sweep.sh                                          # whole 1M list (detached)
+./scripts/domains.sh -n 200 > domains.txt                   # dump candidates
 ```
 
-Images are written to `$MEDIA_ROOT`, metadata to `data/harvest.duckdb`.
+`PROBE_TIMEOUT` (default `4s`) is the per-domain budget; short timeouts plus many
+workers (`SWEEP_WORKERS`, default 96) are what make sweeping all 1M entries
+practical. A sweep logs to `logs/sweep.log` and keeps only reachable domains.
+
+Images are written to `$MEDIA_ROOT`, metadata to `data/harvest.duckdb`
+(local disk, ~3 MB, never on the NAS). Domain discovery also runs daily from
+`image-harvest-discover.timer` and logs to `logs/discover.log`.
 
 ### Ops
 

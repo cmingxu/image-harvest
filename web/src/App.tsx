@@ -1,11 +1,12 @@
 import { Navigate, NavLink, Route, Routes } from 'react-router-dom'
-import { BarChart3, Image as ImageIcon, Search, FolderTree } from 'lucide-react'
+import { BarChart3, Image as ImageIcon, Search, FolderTree, Database } from 'lucide-react'
 
 import { cn } from './lib/utils'
 import RunsPage from './pages/RunsPage'
 import RunDetailPage from './pages/RunDetailPage'
 import DiscoverPage from './pages/DiscoverPage'
 import CategoriesPage from './pages/CategoriesPage'
+import MetadataPage from './pages/MetadataPage'
 
 const sidebarSections = [
   {
@@ -18,6 +19,10 @@ const sidebarSections = [
       { to: '/discover', label: 'Discover', icon: Search },
       { to: '/categories', label: 'Categories', icon: FolderTree },
     ],
+  },
+  {
+    title: 'System',
+    items: [{ to: '/metadata', label: 'Metadata', icon: Database }],
   },
 ]
 
@@ -76,6 +81,7 @@ function AppLayout() {
               <Route path="/runs/:id" element={<RunDetailPage />} />
               <Route path="/discover" element={<DiscoverPage />} />
               <Route path="/categories" element={<CategoriesPage />} />
+              <Route path="/metadata" element={<MetadataPage />} />
               <Route path="*" element={<Navigate to="/runs" replace />} />
             </Routes>
           </div>

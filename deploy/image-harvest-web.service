@@ -11,6 +11,7 @@ ConditionPathIsDirectory=__OUT_DIR__
 [Service]
 Type=simple
 WorkingDirectory=__APP_DIR__
+EnvironmentFile=__APP_DIR__/config.env
 # refuse to run if the media root is not really on a network filesystem
 ExecStartPre=/bin/sh -c 'fs=$(findmnt -n -o FSTYPE -T __OUT_DIR__); case "$$fs" in cifs|smb3|nfs|nfs4) exit 0;; *) echo "refusing to start: __OUT_DIR__ is on local fs ($$fs), NAS not mounted"; exit 1;; esac'
 ExecStart=__APP_DIR__/bin/harvest-web -addr __ADDR__ -db __APP_DIR__/data/harvest.duckdb -out __OUT_DIR__

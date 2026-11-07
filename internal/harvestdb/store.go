@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"sort"
+	"strconv"
 
 	_ "github.com/marcboeker/go-duckdb" // registers the "duckdb" driver
 
@@ -115,6 +116,17 @@ CREATE TABLE IF NOT EXISTS categories (
   parent_id INTEGER DEFAULT 0
 );`
 
+// pageClause renders LIMIT/OFFSET; limit <= 0 means "no paging".
+func pageClause(limit, offset int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return " LIMIT " + strconv.Itoa(limit) + " OFFSET " + strconv.Itoa(offset)
+}
+
 // Store wraps the DuckDB file.
 type Store struct{ db *sql.DB }
 
@@ -196,8 +208,21 @@ func (s *Store) InsertImages(runID int64, imgs []Image) error {
 }
 
 // ListRuns returns all runs, newest first.
-func (s *Store) ListRuns() ([]Run, error) {
-	rows, err := s.db.Query("SELECT id, domain, started_at, duration_s, depth, pages_visited, images_downloaded FROM runs ORDER BY id DESC")
+func (s *Store) ListRuns() ([]Run, error) { return s.listRuns(0, 0) }
+
+// CountRuns returns the number of crawl runs.
+func (s *Store) CountRuns() (int64, error) {
+	var n int64
+	err := s.db.QueryRow("SELECT COUNT(*) FROM runs").Scan(&n)
+	return n, err
+}
+
+// ListRunsPage returns one page of runs, newest first (limit <= 0 = no limit).
+func (s *Store) ListRunsPage(limit, offset int) ([]Run, error) { return s.listRuns(limit, offset) }
+
+func (s *Store) listRuns(limit, offset int) ([]Run, error) {
+	q := "SELECT id, domain, started_at, duration_s, depth, pages_visited, images_downloaded FROM runs ORDER BY id DESC" + pageClause(limit, offset)
+	rows, err := s.db.Query(q)
 	if err != nil {
 		return nil, err
 	}
@@ -297,8 +322,23 @@ func (s *Store) ListCategories() ([]Category, error) {
 	}
 	return cats, rows.Err()
 }
-func (s *Store) ListDomains() ([]Domain, error) {
-	rows, err := s.db.Query("SELECT id, domain, source, score, img_density, hi_res_ratio, samples, last_checked, note FROM domains ORDER BY score DESC")
+func (s *Store) ListDomains() ([]Domain, error) { return s.listDomains(0, 0) }
+
+// CountDomains returns the number of stored candidate domains.
+func (s *Store) CountDomains() (int64, error) {
+	var n int64
+	err := s.db.QueryRow("SELECT COUNT(*) FROM domains").Scan(&n)
+	return n, err
+}
+
+// ListDomainsPage returns one page of candidates, best score first.
+func (s *Store) ListDomainsPage(limit, offset int) ([]Domain, error) {
+	return s.listDomains(limit, offset)
+}
+
+func (s *Store) listDomains(limit, offset int) ([]Domain, error) {
+	const cols = "SELECT id, domain, source, score, img_density, hi_res_ratio, samples, last_checked, note FROM domains ORDER BY score DESC, domain"
+	rows, err := s.db.Query(cols + pageClause(limit, offset))
 	if err != nil {
 		return nil, err
 	}
@@ -313,15 +353,82 @@ func (s *Store) ListDomains() ([]Domain, error) {
 	}
 	return ds, rows.Err()
 }
+
+// Stats summarises what the database holds; the dashboard shows it as metadata.
+type Stats struct {
+	Runs           int64  `json:"runs"`
+	Images         int64  `json:"images"`
+	SavedImages    int64  `json:"saved_images"`
+	SkippedImages  int64  `json:"skipped_images"`
+	TotalBytes     int64  `json:"total_bytes"`
+	Domains        int64  `json:"domains"`
+	DomainsScored  int64  `json:"domains_scored"`
+	Categories     int64  `json:"categories"`
+	LastCrawl      string `json:"last_crawl"`
+	LastDiscovered string `json:"last_discovered"`
+}
+
+// Stats returns row counts and the latest timestamps of the database.
+func (s *Store) Stats() (Stats, error) {
+	var st Stats
+	one := func(q string, dst any) error { return s.db.QueryRow(q).Scan(dst) }
+	if err := one("SELECT COUNT(*) FROM runs", &st.Runs); err != nil {
+		return st, err
+	}
+	if err := one("SELECT COUNT(*) FROM images", &st.Images); err != nil {
+		return st, err
+	}
+	if err := one("SELECT COUNT(*) FROM images WHERE skipped = ''", &st.SavedImages); err != nil {
+		return st, err
+	}
+	st.SkippedImages = st.Images - st.SavedImages
+	if err := one("SELECT COALESCE(SUM(size_bytes),0) FROM images WHERE skipped = ''", &st.TotalBytes); err != nil {
+		return st, err
+	}
+	if err := one("SELECT COUNT(*) FROM domains", &st.Domains); err != nil {
+		return st, err
+	}
+	if err := one("SELECT COUNT(*) FROM domains WHERE score > 0", &st.DomainsScored); err != nil {
+		return st, err
+	}
+	if err := one("SELECT COUNT(*) FROM categories", &st.Categories); err != nil {
+		return st, err
+	}
+	if err := one("SELECT CAST(COALESCE(MAX(started_at),'') AS VARCHAR) FROM runs", &st.LastCrawl); err != nil {
+		return st, err
+	}
+	if err := one("SELECT CAST(COALESCE(MAX(last_checked),'') AS VARCHAR) FROM domains", &st.LastDiscovered); err != nil {
+		return st, err
+	}
+	return st, nil
+}
+
 func (s *Store) ListImages(runID int64, filter string) ([]Image, error) {
-	q := "SELECT id, run_id, url, width, height, ext, saved_path, size_bytes, skipped, phash FROM images WHERE run_id = ?"
+	return s.ListImagesPage(runID, filter, 0, 0)
+}
+
+// imageFilterSQL returns the WHERE addition for a "saved"/"skipped"/"all" filter.
+func imageFilterSQL(filter string) string {
 	switch filter {
 	case "saved":
-		q += " AND skipped = ''"
+		return " AND skipped = ''"
 	case "skipped":
-		q += " AND skipped <> ''"
+		return " AND skipped <> ''"
 	}
-	q += " ORDER BY id"
+	return ""
+}
+
+// CountImages returns how many images match the filter for a run.
+func (s *Store) CountImages(runID int64, filter string) (int64, error) {
+	var n int64
+	err := s.db.QueryRow("SELECT COUNT(*) FROM images WHERE run_id = ?"+imageFilterSQL(filter), runID).Scan(&n)
+	return n, err
+}
+
+// ListImagesPage returns one page of a run's images (limit <= 0 = all).
+func (s *Store) ListImagesPage(runID int64, filter string, limit, offset int) ([]Image, error) {
+	q := "SELECT id, run_id, url, width, height, ext, saved_path, size_bytes, skipped, phash FROM images WHERE run_id = ?" +
+		imageFilterSQL(filter) + " ORDER BY id" + pageClause(limit, offset)
 	rows, err := s.db.Query(q, runID)
 	if err != nil {
 		return nil, err

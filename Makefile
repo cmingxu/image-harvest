@@ -3,7 +3,7 @@ BIN ?= bin
 WEB_DIR ?= web
 DOMAIN ?= ifeng.com
 
-.PHONY: all build build-web test vet run-harvest run-server clean deploy crawl
+.PHONY: all build build-web test vet run-harvest run-server clean deploy crawl discover sweep domains
 
 all: build build-web
 
@@ -39,3 +39,12 @@ deploy:
 
 crawl:
 	./scripts/crawl.sh $(ARGS)
+
+discover:
+	./scripts/discover.sh $(ARGS)
+
+sweep:            # probe the whole top-1M list (detached, chunked)
+	./scripts/sweep.sh $(ARGS)
+
+domains:          # list stored candidate domains (ARGS="-n 500" / "-csv")
+	./scripts/domains.sh $(ARGS)

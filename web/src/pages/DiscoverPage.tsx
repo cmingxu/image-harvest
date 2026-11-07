@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 
+import Pagination from '../components/Pagination'
 import {
   Table,
   TableBody,
@@ -23,14 +24,20 @@ interface Domain {
 
 export default function DiscoverPage() {
   const [domains, setDomains] = useState<Domain[]>([])
+  const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
+  const [limit, setLimit] = useState(50)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    fetch('/api/domains')
+    fetch(`/api/domains?page=${page}&limit=${limit}`)
       .then((r) => r.json())
-      .then((d) => setDomains(d.domains ?? []))
+      .then((d) => {
+        setDomains(d.domains ?? [])
+        setTotal(d.total ?? 0)
+      })
       .catch((e) => setError(String(e)))
-  }, [])
+  }, [page, limit])
 
   if (error) {
     return <p className="text-sm text-red-500">{error}</p>
@@ -38,7 +45,10 @@ export default function DiscoverPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold">Candidate domains</h1>
+      <div className="flex items-baseline justify-between">
+        <h1 className="text-xl font-semibold">Candidate domains</h1>
+        <span className="text-sm text-muted-foreground">{total.toLocaleString()} reachable candidates</span>
+      </div>
       <p className="text-sm text-muted-foreground">
         Probing measures homepage image density and samples a few images for resolution. Run{' '}
         <code className="rounded bg-muted px-1">image-harvest -discover</code> to refresh.
@@ -58,7 +68,7 @@ export default function DiscoverPage() {
         <TableBody>
           {domains.map((d, i) => (
             <TableRow key={d.id}>
-              <TableCell>{i + 1}</TableCell>
+              <TableCell>{(page - 1) * limit + i + 1}</TableCell>
               <TableCell className="font-medium">{d.domain}</TableCell>
               <TableCell>{d.score.toFixed(1)}</TableCell>
               <TableCell className="text-right">{d.img_density}</TableCell>
@@ -78,6 +88,17 @@ export default function DiscoverPage() {
           )}
         </TableBody>
       </Table>
+      <Pagination
+        page={page}
+        limit={limit}
+        total={total}
+        onPage={setPage}
+        onLimit={(l) => {
+          setLimit(l)
+          setPage(1)
+        }}
+        label="domains"
+      />
     </div>
   )
 }
