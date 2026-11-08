@@ -129,11 +129,55 @@ func newClient() *http.Client {
 	}
 }
 
+// --- request pacing -------------------------------------------------------
+//
+// A single crawl shares one rate limit: every outgoing request (page fetch,
+// image download, retry) waits until the interval has elapsed since the
+// previous one. Set with SetInterval from the CLI (-interval).
+var (
+	reqMu       sync.Mutex
+	reqInterval time.Duration
+	lastRequest time.Time
+)
+
+// SetInterval enforces a minimum delay between outgoing HTTP requests.
+// Zero disables pacing.
+func SetInterval(d time.Duration) {
+	reqMu.Lock()
+	reqInterval = d
+	reqMu.Unlock()
+}
+
+// Interval reports the current request pacing.
+func Interval() time.Duration {
+	reqMu.Lock()
+	defer reqMu.Unlock()
+	return reqInterval
+}
+
+// waitTurn blocks until this request may go out. The lock is held across the
+// sleep on purpose: concurrent workers must queue up, otherwise two of them
+// would sleep for the same window and fire together, doubling the rate.
+func waitTurn() {
+	reqMu.Lock()
+	defer reqMu.Unlock()
+	if reqInterval <= 0 {
+		return
+	}
+	if !lastRequest.IsZero() {
+		if wait := reqInterval - time.Since(lastRequest); wait > 0 {
+			time.Sleep(wait)
+		}
+	}
+	lastRequest = time.Now()
+}
+
 // get fetches a URL with browser-like headers, retrying 3 times with
 // backoff on 403/429/5xx (the usual bot-protection statuses).
 func Get(u string) (*http.Response, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
+		waitTurn() // honor -interval before every request, retries included
 		req, err := http.NewRequest("GET", u, nil)
 		if err != nil {
 			return nil, err

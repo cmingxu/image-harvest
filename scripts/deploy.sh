@@ -32,12 +32,15 @@ DEPTH=${DEPTH:-2}                               # link depth
 MIN_RES=${MIN_RES:-1200x800}                    # only high-resolution images
 QUALITY=${QUALITY:-92}                          # JPEG quality for webp->jpg
 MAX_PAGES=${MAX_PAGES:-200}
-WORKERS=${WORKERS:-4}
+WORKERS=${WORKERS:-1}
 DISCOVER_LIMIT=${DISCOVER_LIMIT:-2000}          # only used by the optional -discover probe
 DISCOVER_OFFSET=${DISCOVER_OFFSET:-0}
 PROBE_TIMEOUT=${PROBE_TIMEOUT:-2s}              # only used by the optional -discover probe
 DISCOVER_RETRY_AFTER=${DISCOVER_RETRY_AFTER:-336h}
 IMPORT_REFRESH=${IMPORT_REFRESH:-}             # set to 1 to re-download the list on import
+REQUEST_INTERVAL=${REQUEST_INTERVAL:-1s}       # min delay between HTTP requests
+DOMAIN_INTERVAL=${DOMAIN_INTERVAL:-10s}        # delay between domains while scraping
+SCRAPE=${SCRAPE:-0}                            # 1 = start the scraper service too
 LIST=${LIST:-https://s3-us-west-1.amazonaws.com/umbrella-static/top-1m.csv.zip}
 TIMER=${IMPORT_TIMER:-1}                        # install the daily import timer
 LIST_SYNC=${LIST_SYNC:-1}                       # upload local top-1m.csv if present
@@ -150,6 +153,8 @@ WORKERS=$WORKERS
 DISCOVER_LIMIT=$DISCOVER_LIMIT
 DISCOVER_OFFSET=$DISCOVER_OFFSET
 PROBE_TIMEOUT=$PROBE_TIMEOUT
+REQUEST_INTERVAL=$REQUEST_INTERVAL
+DOMAIN_INTERVAL=$DOMAIN_INTERVAL
 LIST=$LIST
 IMPORT_REFRESH=$IMPORT_REFRESH
 EOF
@@ -187,6 +192,11 @@ else
   ssh "$DEPLOY_HOST" "mkdir -p ~/.config/systemd/user"
   scp -q /tmp/"$SERVICE".service "$DEPLOY_HOST:.config/systemd/user/$SERVICE.service"
 
+  # scraper service (crawls imported domains, high-res only)
+  sed -e "s|__APP_DIR__|$REMOTE_ABS|g" -e "s|__OUT_DIR__|$MEDIA_ROOT|g" -e "s|__MOUNT_DIR__|$MOUNT_DIR|g" \
+    "$ROOT/deploy/image-harvest-scrape.service" > /tmp/image-harvest-scrape.service
+  scp -q /tmp/image-harvest-scrape.service "$DEPLOY_HOST:.config/systemd/user/image-harvest-scrape.service"
+
   # domain-list import service + daily timer
   sed -e "s|__APP_DIR__|$REMOTE_ABS|g" "$ROOT/deploy/image-harvest-import.service" > /tmp/image-harvest-import.service
   scp -q /tmp/image-harvest-import.service "$DEPLOY_HOST:.config/systemd/user/image-harvest-import.service"
@@ -210,6 +220,18 @@ rsh "export XDG_RUNTIME_DIR=/run/user/\$(id -u)
   done
   pkill -f 'harvest -disc[o]ver' >/dev/null 2>&1 || true
   systemctl --user daemon-reload"
+
+log "scraper service"
+if [ "$SCRAPE" = 1 ]; then
+  rsh "export XDG_RUNTIME_DIR=/run/user/\$(id -u)
+    systemctl --user daemon-reload
+    systemctl --user enable --now image-harvest-scrape.service
+    sleep 5
+    systemctl --user is-active image-harvest-scrape.service
+    tail -3 '$REMOTE_ABS/logs/scrape.log' 2>/dev/null || true"
+else
+  rsh "export XDG_RUNTIME_DIR=/run/user/\$(id -u); systemctl --user disable --now image-harvest-scrape.service >/dev/null 2>&1 || true"
+fi
 
 log "domain-list import timer"
 if [ "$IMPORT_TIMER" = 1 ]; then

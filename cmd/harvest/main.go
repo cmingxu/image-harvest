@@ -23,9 +23,13 @@ func main() {
 	depth := flag.Int("depth", 2, "link depth to crawl (0 = seed page only)")
 	minRes := flag.String("min", "1200x800", "minimum image resolution WxH — only high-resolution images are downloaded")
 	workers := flag.Int("workers", 4, "concurrent fetches")
-	maxPages := flag.Int("maxpages", 500, "stop crawling after this many pages")
+	maxPages := flag.Int("maxpages", 200, "stop crawling after this many pages")
 	out := flag.String("out", ".", "output directory")
 	quality := flag.Int("quality", 92, "JPEG quality for webp->jpg conversion")
+	interval := flag.Duration("interval", 0, "minimum delay between outgoing requests, e.g. 1s (0 = no pacing)")
+	domainInterval := flag.Duration("domain-interval", 0, "delay between finishing one domain and starting the next")
+	doCrawlDomains := flag.Bool("crawl-domains", false, "crawl every imported domain that has not been crawled yet (rank order), then keep going")
+	crawlLimit := flag.Int("crawl-limit", 0, "with -crawl-domains: stop after this many domains (0 = all)")
 	dbPath := flag.String("db", "harvest.duckdb", "duckdb metadata file (empty disables)")
 	rehash := flag.Bool("rehash", false, "backfill perceptual hashes for already-saved images, then exit")
 	requireNetFS := flag.Bool("require-netfs", false, "refuse to run unless -out is on a network filesystem (cifs/nfs), so a missing NAS mount cannot fill the local disk")
@@ -42,6 +46,17 @@ func main() {
 	discoverForce := flag.Bool("discover-force", false, "re-probe domains even if they were probed recently")
 	discoverRetry := flag.Duration("discover-retry-after", 14*24*time.Hour, "re-probe a domain only after this long (0 = never re-probe)")
 	flag.Parse()
+
+	// request pacing applies to every mode that fetches over the network
+	crawler.SetInterval(*interval)
+
+	if *doCrawlDomains {
+		if err := crawlDomains(*dbPath, *out, *depth, *minRes, *quality, *maxPages, *workers, *crawlLimit, *interval, *domainInterval, *requireNetFS); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *doImport {
 		if err := importDomains(*dbPath, *list, *listCache, *refresh, *importReset); err != nil {
@@ -162,6 +177,78 @@ func refreshCategories(dbPath string) error {
 // The list is written in batches, each on its own short-lived connection:
 // DuckDB holds its file lock for the lifetime of a connection, so this is what
 // lets the dashboard keep answering while a million rows are imported.
+// crawlDomains walks the imported domain list and crawls each entry that has not
+// been crawled yet, in rank order. Between domains it waits domainInterval, and
+// every outgoing request is paced by crawler.SetInterval (-interval).
+// Only images at or above -min are downloaded.
+func crawlDomains(dbPath, out string, depth int, minRes string, quality, maxPages, workers, limit int, interval, domainInterval time.Duration, requireNetFS bool) error {
+	w, h, err := parseRes(minRes)
+	if err != nil {
+		return fmt.Errorf("bad -min: %w", err)
+	}
+	if requireNetFS {
+		if err := checkNetFS(out); err != nil {
+			return err
+		}
+	}
+
+	store, err := openWithRetry(dbPath, 20)
+	if err != nil {
+		return err
+	}
+	pending, err := store.DomainsToCrawl(limit)
+	store.Close()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("crawl plan: %d domains, depth=%d min=%dx%d quality=%d maxpages=%d workers=%d interval=%s domain-interval=%s\n",
+		len(pending), depth, w, h, quality, maxPages, workers, interval, domainInterval)
+	if len(pending) == 0 {
+		fmt.Println("nothing to crawl: every imported domain already has a last_crawled mark")
+		return nil
+	}
+
+	for i, domain := range pending {
+		started := time.Now()
+		fmt.Printf("[%d/%d] %s %s\n", i+1, len(pending), domain, started.Format("15:04:05"))
+
+		res, crawlErr := crawler.Run(domain, depth, w, h, workers, maxPages, quality, out)
+		if crawlErr != nil {
+			fmt.Fprintf(os.Stderr, "  %s: %v\n", domain, crawlErr)
+		} else {
+			fmt.Printf("  pages=%d candidates=%d saved=%d skipped=%d dir=%s (%.0fs)\n",
+				res.Pages, res.Candidates, res.Saved, res.Skipped, res.Dir, time.Since(started).Seconds())
+		}
+
+		// record the run (short-lived connection: the dashboard keeps reading)
+		if s, err := openWithRetry(dbPath, 20); err == nil {
+			saved := res.Saved // zero when the crawl itself failed
+			if _, err := s.InsertRun(harvestdb.Run{
+				Domain:           domain,
+				StartedAt:        started.Format("2006-01-02 15:04:05"),
+				DurationS:        time.Since(started).Seconds(),
+				Depth:            depth,
+				PagesVisited:     res.Pages,
+				ImagesDownloaded: res.Saved,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "  db run: %v\n", err)
+			}
+			if err := s.MarkDomainCrawled(domain, time.Now().Format("2006-01-02 15:04:05"), saved); err != nil {
+				fmt.Fprintf(os.Stderr, "  db mark: %v\n", err)
+			}
+			s.Close()
+		} else {
+			fmt.Fprintf(os.Stderr, "  db open: %v\n", err)
+		}
+
+		if i < len(pending)-1 && domainInterval > 0 {
+			fmt.Printf("  waiting %s before the next domain\n", domainInterval)
+			time.Sleep(domainInterval)
+		}
+	}
+	return nil
+}
+
 func importDomains(dbPath, list, cachePath string, refresh, reset bool) error {
 	domains, err := discover.LoadList(list, cachePath, refresh)
 	if err != nil {

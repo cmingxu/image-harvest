@@ -64,6 +64,33 @@ bin/harvest-web -db harvest.duckdb -out .   # http://localhost:8080
 - Run detail: image grid with metadata; click an image for a detail modal
   showing visually similar images (dHash, Hamming distance ≤ 10).
 
+## Scrape (rate limited, high-res only)
+
+```sh
+./scripts/scrape.sh            # start/restart the scraper service
+./scripts/scrape.sh --status   # progress + last log lines
+./scripts/scrape.sh --tail      # follow logs/scrape.log
+./scripts/scrape.sh --stop
+```
+
+`image-harvest-scrape.service` crawls every imported domain that has no
+`last_crawled` mark, in rank order, and records each run in DuckDB:
+
+| setting | default | meaning |
+|---|---|---|
+| `REQUEST_INTERVAL` | `1s` | minimum gap between **every** outgoing request |
+| `DOMAIN_INTERVAL` | `10s` | pause between finishing one domain and the next |
+| `MIN_RES` | `1200x800` | smaller images are rejected before download |
+| `QUALITY` | `92` | JPEG quality for webp→jpg |
+| `DEPTH` / `MAX_PAGES` | `2` / `200` | crawl breadth per domain |
+
+Identical flags on the CLI:
+
+```sh
+bin/image-harvest -crawl-domains -interval 1s -domain-interval 10s \
+                  -min 1200x800 -out /mnt/nas/Photos -db harvest.duckdb
+```
+
 ## Deploy (systemd)
 
 ```sh

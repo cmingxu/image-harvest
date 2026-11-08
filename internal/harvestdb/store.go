@@ -3,6 +3,7 @@ package harvestdb
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"sort"
 	"strconv"
@@ -106,7 +107,8 @@ CREATE TABLE IF NOT EXISTS domains (
   hi_res_ratio DOUBLE DEFAULT 0,
   samples INTEGER DEFAULT 0,
   last_checked TEXT,
-  note TEXT DEFAULT ''
+  note TEXT DEFAULT '',
+  last_crawled TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS probes (
   domain TEXT PRIMARY KEY,
@@ -149,10 +151,15 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	// migration for databases created before the phash column existed
-	if _, err := db.Exec("ALTER TABLE images ADD COLUMN IF NOT EXISTS phash BIGINT DEFAULT 0"); err != nil {
-		db.Close()
-		return nil, err
+	// migrations for databases created before these columns existed
+	for _, mig := range []string{
+		"ALTER TABLE images ADD COLUMN IF NOT EXISTS phash BIGINT DEFAULT 0",
+		"ALTER TABLE domains ADD COLUMN IF NOT EXISTS last_crawled TEXT DEFAULT ''",
+	} {
+		if _, err := db.Exec(mig); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	return &Store{db: db}, nil
 }
@@ -406,6 +413,41 @@ func (s *Store) ClearDomains() error {
 		}
 	}
 	return nil
+}
+
+// DomainsToCrawl returns up to limit candidate domains that have never been
+// crawled, in list-rank order (limit <= 0 = all).
+func (s *Store) DomainsToCrawl(limit int) ([]string, error) {
+	q := "SELECT domain FROM domains WHERE COALESCE(last_crawled,'') = '' ORDER BY id" + pageClause(limit, 0)
+	rows, err := s.db.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// CountToCrawl counts candidates that have not been crawled yet.
+func (s *Store) CountToCrawl() (int64, error) {
+	var n int64
+	err := s.db.QueryRow("SELECT COUNT(*) FROM domains WHERE COALESCE(last_crawled,'') = ''").Scan(&n)
+	return n, err
+}
+
+// MarkDomainCrawled records that a domain was processed (or attempted), so the
+// scraper moves on to the next one on a restart.
+func (s *Store) MarkDomainCrawled(domain, stamp string, saved int) error {
+	_, err := s.db.Exec("UPDATE domains SET last_crawled = ?, note = ? WHERE domain = ?",
+		stamp, fmt.Sprintf("crawled: %d images", saved), domain)
+	return err
 }
 
 // ImportDomains inserts every domain that is not in the table yet and returns
