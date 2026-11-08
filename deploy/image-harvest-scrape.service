@@ -18,9 +18,10 @@ ExecStartPre=/bin/sh -c 'fs=$(findmnt -n -o FSTYPE -T __OUT_DIR__); case "$$fs" 
 ExecStart=/bin/sh -c 'exec __APP_DIR__/bin/image-harvest -crawl-domains -require-netfs \
   -db __APP_DIR__/data/harvest.duckdb \
   -out __OUT_DIR__ \
-  -depth "${DEPTH:-2}" -min "${MIN_RES:-1200x800}" -quality "${QUALITY:-92}" \
+  -depth "${DEPTH:-2}" -min "${MIN_RES:-600x400}" -quality "${QUALITY:-92}" \
   -maxpages "${MAX_PAGES:-200}" -workers "${WORKERS:-2}" \
-  -interval "${REQUEST_INTERVAL:-1s}" \
+  -interval "${REQUEST_INTERVAL:-0s}" \
+  $( [ "${DEBUG_REQUESTS:-1}" = "1" ] && echo -debug-requests ) \
   -domain-timeout "${DOMAIN_TIMEOUT:-10m}" \
   $( [ -n "${CRAWL_OFFSET}" ] && echo "-crawl-offset ${CRAWL_OFFSET}" ) \
   $( [ "${SUBDOMAINS:-0}" = "1" ] && echo -subdomains ) \

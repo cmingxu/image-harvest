@@ -10,7 +10,7 @@
 # has no last_crawled mark yet, in rank order:
 #   * every request waits REQUEST_INTERVAL (default 1s)
 #   * each domain is followed by DOMAIN_INTERVAL (default 10s)
-#   * only images >= MIN_RES (default 1200x800) are downloaded, saved to the NAS
+#   * only images >= MIN_RES (default 600x400) are downloaded, saved to the NAS
 set -euo pipefail
 
 DEPLOY_HOST=${DEPLOY_HOST:-dev}

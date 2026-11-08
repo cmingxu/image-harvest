@@ -15,12 +15,12 @@ make test
 ## Crawl
 
 ```sh
-bin/image-harvest [-depth 2] [-min 1200x800] [-workers 4] [-maxpages 200] \
+bin/image-harvest [-depth 2] [-min 600x400] [-workers 4] [-maxpages 200] \
                   [-out .] [-quality 92] [-db harvest.duckdb] <domain>
 ```
 
 Only high-resolution images are kept: candidates smaller than `-min`
-(default **1200x800**) are rejected before download, and webp is re-encoded at
+(default **600x400**) are rejected before download, and webp is re-encoded at
 `-quality` (default **92**). Per-domain link depth is `-depth` (0 = seed page
 only).
 
@@ -82,7 +82,7 @@ back in).
 |---|---|---|
 | `REQUEST_INTERVAL` | `1s` | minimum gap between **every** outgoing request |
 | `DOMAIN_INTERVAL` | `10s` | pause between finishing one domain and the next |
-| `MIN_RES` | `1200x800` | smaller images are rejected before download |
+| `MIN_RES` | `600x400` | smaller images are rejected before download |
 | `QUALITY` | `92` | JPEG quality for webp→jpg |
 | `DEPTH` / `MAX_PAGES` | `2` / `200` | crawl breadth per domain |
 | `SUBDOMAINS` | `0` | keep crawling on the seed host only (no subdomain enumeration) |
@@ -99,7 +99,7 @@ Identical flags on the CLI:
 
 ```sh
 bin/image-harvest -crawl-domains -interval 1s -domain-interval 10s \
-                  -domain-timeout 10m -min 1200x800 \
+                  -domain-timeout 10m -min 600x400 \
                   -out /mnt/nas/Photos -db harvest.duckdb
 # -crawl-offset N   start at list rank N (remembered afterwards)
 # images stream to disk page by page while the crawl is still running
@@ -126,7 +126,7 @@ automatically through `GOPROXY` (`https://goproxy.cn,direct` by default).
 | `PORT` | `8088` | dashboard port |
 | `MEDIA_ROOT` | `/mnt/nas/Photos` | where images are written — **must be a NAS mount** |
 | `DEPTH` | `2` | crawl depth |
-| `MIN_RES` | `1200x800` | minimum resolution; smaller images are skipped |
+| `MIN_RES` | `600x400` | minimum resolution; smaller images are skipped |
 | `QUALITY` | `92` | JPEG quality for webp→jpg |
 | `MAX_PAGES` | `200` | page cap per crawl |
 | `WORKERS` | `4` | concurrent fetches |

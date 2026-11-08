@@ -29,7 +29,7 @@ MEDIA_ROOT=${MEDIA_ROOT:-/mnt/nas/Photos}       # NAS path for harvested images
 
 # crawl settings, written to config.env and used by the units + crawl.sh
 DEPTH=${DEPTH:-2}                               # link depth
-MIN_RES=${MIN_RES:-1200x800}                    # only high-resolution images
+MIN_RES=${MIN_RES:-600x400}                    # minimum image resolution (smaller images are skipped)
 QUALITY=${QUALITY:-92}                          # JPEG quality for webp->jpg
 MAX_PAGES=${MAX_PAGES:-200}
 WORKERS=${WORKERS:-1}
@@ -38,7 +38,8 @@ DISCOVER_OFFSET=${DISCOVER_OFFSET:-0}
 PROBE_TIMEOUT=${PROBE_TIMEOUT:-2s}              # only used by the optional -discover probe
 DISCOVER_RETRY_AFTER=${DISCOVER_RETRY_AFTER:-336h}
 IMPORT_REFRESH=${IMPORT_REFRESH:-}             # set to 1 to re-download the list on import
-REQUEST_INTERVAL=${REQUEST_INTERVAL:-1s}       # min delay between HTTP requests
+REQUEST_INTERVAL=${REQUEST_INTERVAL:-0s}       # min delay between HTTP requests (0s = none)
+DEBUG_REQUESTS=${DEBUG_REQUESTS:-1}            # 1 = log every request + image verdict
 DOMAIN_INTERVAL=${DOMAIN_INTERVAL:-10s}        # delay between domains while scraping
 SUBDOMAINS=${SUBDOMAINS:-0}                    # 1 = also crawl subdomains of the seed host
 DOMAIN_TIMEOUT=${DOMAIN_TIMEOUT:-10m}          # abandon one domain after this long
@@ -157,6 +158,7 @@ DISCOVER_LIMIT=$DISCOVER_LIMIT
 DISCOVER_OFFSET=$DISCOVER_OFFSET
 PROBE_TIMEOUT=$PROBE_TIMEOUT
 REQUEST_INTERVAL=$REQUEST_INTERVAL
+DEBUG_REQUESTS=$DEBUG_REQUESTS
 DOMAIN_INTERVAL=$DOMAIN_INTERVAL
 SUBDOMAINS=$SUBDOMAINS
 DOMAIN_TIMEOUT=$DOMAIN_TIMEOUT

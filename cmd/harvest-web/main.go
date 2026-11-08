@@ -82,7 +82,7 @@ func main() {
 			MediaRoot: absOut,
 			Config: map[string]string{
 				"depth":          env("DEPTH", "2"),
-				"min_res":        env("MIN_RES", "1200x800"),
+				"min_res":        env("MIN_RES", "600x400"),
 				"quality":        env("QUALITY", "92"),
 				"max_pages":      env("MAX_PAGES", "200"),
 				"workers":        env("WORKERS", "4"),

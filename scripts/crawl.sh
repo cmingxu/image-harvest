@@ -31,7 +31,7 @@ esac
 
 echo "config: depth=$DEPTH min=$MIN_RES quality=$QUALITY max_pages=$MAX_PAGES workers=$WORKERS"
 exec ./bin/image-harvest -require-netfs \
-  -depth "${DEPTH:-2}" -min "${MIN_RES:-1200x800}" -quality "${QUALITY:-92}" \
+  -depth "${DEPTH:-2}" -min "${MIN_RES:-600x400}" -quality "${QUALITY:-92}" \
   -maxpages "${MAX_PAGES:-200}" -workers "${WORKERS:-4}" \
   -out "$MEDIA_ROOT" -db data/harvest.duckdb "$@"
 REMOTE

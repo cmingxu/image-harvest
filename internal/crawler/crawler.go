@@ -12,6 +12,7 @@ import (
 	"image/jpeg"
 	_ "image/png" // register png decoder for DecodeConfig
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -254,6 +255,35 @@ func Subdomains() bool {
 	return allowSubdomains
 }
 
+// --- per-request debug log ------------------------------------------------
+
+var (
+	debugMu       sync.RWMutex
+	debugRequests bool
+)
+
+// SetDebugRequests turns on one log line per HTTP request (URL, attempt, status,
+// duration, pacing wait, bytes) plus the verdict for every image candidate.
+func SetDebugRequests(on bool) {
+	debugMu.Lock()
+	debugRequests = on
+	debugMu.Unlock()
+}
+
+// DebugRequests reports whether per-request logging is on.
+func DebugRequests() bool {
+	debugMu.RLock()
+	defer debugMu.RUnlock()
+	return debugRequests
+}
+
+// dbgf logs when -debug-requests is enabled; stderr goes to the service log.
+func dbgf(format string, args ...any) {
+	if DebugRequests() {
+		log.Printf(format, args...)
+	}
+}
+
 // --- per-domain budget ----------------------------------------------------
 
 var (
@@ -309,16 +339,20 @@ func waitTurn() {
 	lastRequest = time.Now()
 }
 
+// Get fetches a URL, logging it as an unclassified request.
+func Get(u string) (*http.Response, error) { return get(u, "request") }
+
 // get fetches a URL with browser-like headers, retrying up to 3 times with
 // backoff on 403/429/5xx (the usual bot-protection statuses). Transport errors
 // are retried once at most, and timeouts not at all: a blackholed host will not
 // answer on the second attempt either, and each attempt costs seconds.
-func Get(u string) (*http.Response, error) {
+func get(u, kind string) (*http.Response, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		paceStart := time.Now()
 		waitTurn() // honor -interval before every request, retries included
-		timing.waitNs.Add(int64(time.Since(paceStart)))
+		paceWait := time.Since(paceStart)
+		timing.waitNs.Add(int64(paceWait))
 		req, err := http.NewRequest("GET", u, nil)
 		if err != nil {
 			return nil, err
@@ -329,9 +363,12 @@ func Get(u string) (*http.Response, error) {
 		timing.requests.Add(1)
 		reqStart := time.Now()
 		resp, err := client.Do(req)
-		timing.reqNs.Add(int64(time.Since(reqStart)))
+		reqDur := time.Since(reqStart)
+		timing.reqNs.Add(int64(reqDur))
 		if err != nil {
 			timing.errs.Add(1)
+			dbgf("req %-5s attempt=%d status=ERR dur=%s pace=%s err=%v url=%s",
+				kind, attempt+1, reqDur.Round(time.Millisecond), paceWait.Round(time.Millisecond), err, u)
 			lastErr = err
 			if attempt > 0 || isTimeoutErr(err) {
 				break // host is blocked/unreachable: don't pay for more attempts
@@ -340,6 +377,9 @@ func Get(u string) (*http.Response, error) {
 			time.Sleep(time.Second)
 			continue
 		}
+		dbgf("req %-5s attempt=%d status=%d dur=%s pace=%s len=%d url=%s",
+			kind, attempt+1, resp.StatusCode, reqDur.Round(time.Millisecond), paceWait.Round(time.Millisecond),
+			resp.ContentLength, u)
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden || resp.StatusCode >= 500 {
 			wait := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s
 			if ra := resp.Header.Get("Retry-After"); ra != "" {
@@ -468,7 +508,7 @@ func hostOf(u string) string {
 
 // fetchPage returns same-host links and absolute image URLs found on a page.
 func FetchPage(u string) (links, imgs []string) {
-	resp, err := Get(u)
+	resp, err := get(u, "page")
 	if err != nil {
 		return nil, nil
 	}
@@ -596,9 +636,10 @@ func downloadAll(urls []string, dir, relBase string, minW, minH, quality, worker
 // <dir>/<idx><ext>, and reports the image's metadata + perceptual hash.
 func saveImage(u, relBase, dir string, idx uint32, minW, minH, quality int) (harvestdb.Image, error) {
 	img := harvestdb.Image{URL: u}
-	resp, err := Get(u)
+	resp, err := get(u, "image")
 	if err != nil {
 		img.Skipped = err.Error()
+		dbgf("img  skip err=%v url=%s", err, u)
 		return img, err
 	}
 	defer resp.Body.Close()
@@ -625,6 +666,7 @@ func saveImage(u, relBase, dir string, idx uint32, minW, minH, quality int) (har
 	img.Width, img.Height = cfg.Width, cfg.Height
 	if cfg.Width < minW || cfg.Height < minH {
 		img.Skipped = fmt.Sprintf("%dx%d below minimum", cfg.Width, cfg.Height)
+		dbgf("img  skip %dx%d < %dx%d url=%s", cfg.Width, cfg.Height, minW, minH, u)
 		return img, fmt.Errorf("%s", img.Skipped)
 	}
 	if format == "webp" {
@@ -651,7 +693,13 @@ func saveImage(u, relBase, dir string, idx uint32, minW, minH, quality int) (har
 	if decoded, _, err := image.Decode(bytes.NewReader(data)); err == nil {
 		img.Phash = int64(phash.DHash(decoded))
 	}
-	return img, os.WriteFile(filepath.Join(dir, name), data, 0o644)
+	writeErr := os.WriteFile(filepath.Join(dir, name), data, 0o644)
+	if writeErr == nil {
+		dbgf("img  saved %dx%d %dKB name=%s url=%s", cfg.Width, cfg.Height, len(data)/1024, img.SavedPath, u)
+	} else {
+		dbgf("img  write-failed err=%v url=%s", writeErr, u)
+	}
+	return img, writeErr
 }
 
 // RehashSaved backfills perceptual hashes for saved images whose phash is

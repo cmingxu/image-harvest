@@ -21,12 +21,13 @@ import (
 
 func main() {
 	depth := flag.Int("depth", 2, "link depth to crawl (0 = seed page only)")
-	minRes := flag.String("min", "1200x800", "minimum image resolution WxH — only high-resolution images are downloaded")
+	minRes := flag.String("min", "600x400", "minimum image resolution WxH; smaller images are skipped before download")
 	workers := flag.Int("workers", 4, "concurrent fetches")
 	maxPages := flag.Int("maxpages", 200, "stop crawling after this many pages")
 	out := flag.String("out", ".", "output directory")
 	quality := flag.Int("quality", 92, "JPEG quality for webp->jpg conversion")
 	interval := flag.Duration("interval", 0, "minimum delay between outgoing requests, e.g. 1s (0 = no pacing)")
+	debugRequests := flag.Bool("debug-requests", false, "log every HTTP request (status, duration, pacing wait, bytes) and every image verdict")
 	subdomains := flag.Bool("subdomains", false, "follow links on subdomains of the seed host (default: stay on the seed host)")
 	domainInterval := flag.Duration("domain-interval", 0, "delay between finishing one domain and starting the next")
 	doCrawlDomains := flag.Bool("crawl-domains", false, "crawl every imported domain that has not been crawled yet (rank order), then keep going")
@@ -54,6 +55,7 @@ func main() {
 	crawler.SetInterval(*interval)
 	crawler.SetSubdomains(*subdomains)
 	crawler.SetDomainTimeout(*domainTimeout)
+	crawler.SetDebugRequests(*debugRequests)
 
 	if *doCrawlDomains {
 		if err := crawlDomains(*dbPath, *out, *depth, *minRes, *quality, *maxPages, *workers, *crawlLimit, *crawlOffset, *interval, *domainInterval, *requireNetFS); err != nil {
