@@ -11,6 +11,15 @@ import {
   TableRow,
 } from '../components/ui/table'
 
+/** A run row with duration 0 means the crawl has not finished yet: either it is
+ *  still running (recent start) or the process died (old start). */
+function runState(startedAt: string): string {
+  const started = new Date(startedAt.replace(' ', 'T'))
+  const ageMin = (Date.now() - started.getTime()) / 60000
+  if (Number.isNaN(ageMin)) return '—'
+  return ageMin < 30 ? 'live' : 'interrupted'
+}
+
 interface Run {
   id: number
   domain: string
@@ -71,9 +80,16 @@ export default function RunsPage() {
               </TableCell>
               <TableCell>{r.started_at}</TableCell>
               <TableCell className="text-right">{r.depth}</TableCell>
-              <TableCell className="text-right">{r.pages_visited}</TableCell>
+              <TableCell
+                className="text-right"
+                title={r.duration_s === 0 ? 'counts update live; page count is lost if the crawl was interrupted' : undefined}
+              >
+                {r.duration_s === 0 && runState(r.started_at) === 'interrupted' ? '—' : r.pages_visited}
+              </TableCell>
               <TableCell className="text-right">{r.images_downloaded}</TableCell>
-              <TableCell className="text-right">{r.duration_s.toFixed(0)}s</TableCell>
+              <TableCell className="text-right">
+                {r.duration_s > 0 ? `${r.duration_s.toFixed(0)}s` : runState(r.started_at)}
+              </TableCell>
             </TableRow>
           ))}
           {runs.length === 0 && (

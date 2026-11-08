@@ -225,6 +225,14 @@ func crawlDomains(dbPath, out string, depth int, minRes string, quality, maxPage
 		return err
 	}
 
+	// fix counters of runs left behind by an interrupted crawl
+	if s, err := openWithRetry(dbPath, 20); err == nil {
+		if n, err := s.ReconcileRunCounts(); err == nil && n > 0 {
+			fmt.Printf("reconciled image counts for %d run rows\n", n)
+		}
+		s.Close()
+	}
+
 	fmt.Printf("crawl plan: cursor=%d pending=%d depth=%d min=%dx%d quality=%d maxpages=%d workers=%d interval=%s domain-interval=%s domain-timeout=%s\n",
 		cursor, pendingCount, depth, w, h, quality, maxPages, workers, interval, domainInterval, crawler.DomainTimeout())
 
@@ -277,6 +285,7 @@ func crawlDomains(dbPath, out string, depth int, minRes string, quality, maxPage
 				s.Close()
 			}
 			if runID != 0 {
+				savedSoFar := 0
 				crawler.SetImageSink(func(imgs []harvestdb.Image) {
 					s, err := openWithRetry(dbPath, 20)
 					if err != nil {
@@ -284,6 +293,15 @@ func crawlDomains(dbPath, out string, depth int, minRes string, quality, maxPage
 					}
 					if err := s.InsertImages(runID, imgs); err != nil {
 						fmt.Fprintf(os.Stderr, "  db images: %v\n", err)
+					}
+					for _, im := range imgs {
+						if im.Skipped == "" {
+							savedSoFar++
+						}
+					}
+					// keep the runs row in sync with what is already on disk
+					if err := s.UpdateRunProgress(runID, crawler.Progress(), savedSoFar); err != nil {
+						fmt.Fprintf(os.Stderr, "  db run progress: %v\n", err)
 					}
 					s.Close()
 				})

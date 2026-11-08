@@ -202,6 +202,30 @@ func (s *Store) InsertRun(r Run) (int64, error) {
 	return id, err
 }
 
+// UpdateRunProgress refreshes the counters of a run that is still crawling, so
+// the dashboard shows live page/image counts instead of zeros.
+func (s *Store) UpdateRunProgress(id int64, pages, saved int) error {
+	_, err := s.db.Exec(`UPDATE runs SET pages_visited = ?, images_downloaded = ? WHERE id = ?`,
+		pages, saved, id)
+	return err
+}
+
+// ReconcileRunCounts makes the runs table agree with the image records: a run's
+// images_downloaded is set to the number of saved image rows it actually has.
+// Interrupted runs (killed mid-crawl) were left with stale counts otherwise.
+func (s *Store) ReconcileRunCounts() (int, error) {
+	res, err := s.db.Exec(`UPDATE runs SET images_downloaded = (
+		SELECT COUNT(*) FROM images i WHERE i.run_id = runs.id AND i.skipped = ''
+	) WHERE images_downloaded <> (
+		SELECT COUNT(*) FROM images i WHERE i.run_id = runs.id AND i.skipped = ''
+	)`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // UpdateRunStats finishes a run row: duration, pages and images.
 func (s *Store) UpdateRunStats(id int64, durationS float64, pages, saved int) error {
 	_, err := s.db.Exec(`UPDATE runs SET duration_s = ?, pages_visited = ?, images_downloaded = ? WHERE id = ?`,

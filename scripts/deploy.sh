@@ -44,7 +44,7 @@ DOMAIN_INTERVAL=${DOMAIN_INTERVAL:-10s}        # delay between domains while scr
 SUBDOMAINS=${SUBDOMAINS:-0}                    # 1 = also crawl subdomains of the seed host
 DOMAIN_TIMEOUT=${DOMAIN_TIMEOUT:-10m}          # abandon one domain after this long
 CRAWL_OFFSET=${CRAWL_OFFSET:-}                  # one-off start position; empty = resume from the saved cursor
-SCRAPE=${SCRAPE:-0}                            # 1 = start the scraper service too
+SCRAPE=${SCRAPE:--1}                           # 1 = start+restart, 0 = stop, -1 = leave untouched
 LIST=${LIST:-https://s3-us-west-1.amazonaws.com/umbrella-static/top-1m.csv.zip}
 TIMER=${IMPORT_TIMER:-1}                        # install the daily import timer
 LIST_SYNC=${LIST_SYNC:-1}                       # upload local top-1m.csv if present
@@ -230,7 +230,9 @@ rsh "export XDG_RUNTIME_DIR=/run/user/\$(id -u)
   systemctl --user daemon-reload"
 
 log "scraper service"
-if [ "$SCRAPE" = 1 ]; then
+if [ "$SCRAPE" = -1 ] || [ -z "$SCRAPE" ]; then
+  rsh "export XDG_RUNTIME_DIR=/run/user/\$(id -u); echo \"  left as is: \$(systemctl --user is-active image-harvest-scrape.service)\""
+elif [ "$SCRAPE" = 1 ]; then
   rsh "export XDG_RUNTIME_DIR=/run/user/\$(id -u)
     systemctl --user daemon-reload
     systemctl --user enable image-harvest-scrape.service >/dev/null 2>&1 || true

@@ -76,6 +76,7 @@ func Run(domain string, depth, minW, minH, workers, maxPages, quality int, out s
 	}
 	start := time.Now()
 	resetTiming()
+	resetProgress()
 
 	// The output directory is created up front and images are downloaded page by
 	// page as they are discovered, so files keep landing during a long crawl
@@ -255,6 +256,18 @@ func Subdomains() bool {
 	defer scopeMu.RUnlock()
 	return allowSubdomains
 }
+
+// --- live progress --------------------------------------------------------
+
+var (
+	progressPages atomic.Int64
+)
+
+func resetProgress() { progressPages.Store(0) }
+
+// Progress returns how many pages the current crawl has fetched so far, so the
+// run row can be updated while the domain is still being crawled.
+func Progress() int { return int(progressPages.Load()) }
 
 // --- incremental image sink -----------------------------------------------
 
@@ -484,6 +497,7 @@ func crawl(seed *url.URL, depth, workers, maxPages int, emit func([]string)) int
 
 				mu.Lock()
 				pages++
+				progressPages.Store(int64(pages))
 				if !seenHost[h] {
 					seenHost[h] = true
 					// a content-free first page means a service shell: abandon host
