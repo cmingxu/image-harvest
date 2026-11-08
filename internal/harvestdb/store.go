@@ -110,6 +110,10 @@ CREATE TABLE IF NOT EXISTS domains (
   note TEXT DEFAULT '',
   last_crawled TEXT DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS state (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
 CREATE TABLE IF NOT EXISTS probes (
   domain TEXT PRIMARY KEY,
   last_probed TEXT NOT NULL,
@@ -415,6 +419,60 @@ func (s *Store) ClearDomains() error {
 	return nil
 }
 
+// DomainRow is a candidate domain together with its list position (id).
+type DomainRow struct {
+	ID     int64
+	Domain string
+}
+
+// Cursor returns the saved scrape cursor: the list position (id) the scraper
+// should resume from. 0 means "start of the list".
+func (s *Store) Cursor() (int64, error) {
+	var v string
+	err := s.db.QueryRow("SELECT value FROM state WHERE key = 'scrape.cursor'").Scan(&v)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, nil // unparsable: start over rather than fail
+	}
+	return n, nil
+}
+
+// SetCursor persists the scrape cursor so a restart resumes in place.
+func (s *Store) SetCursor(id int64) error {
+	_, err := s.db.Exec(`INSERT INTO state (key, value) VALUES ('scrape.cursor', ?)
+		ON CONFLICT (key) DO UPDATE SET value = excluded.value`, strconv.FormatInt(id, 10))
+	return err
+}
+
+// PendingDomains returns up to limit domains with id >= fromID that have not
+// been crawled yet, in list-rank order.
+func (s *Store) PendingDomains(fromID int64, limit int) ([]DomainRow, error) {
+	q := "SELECT id, domain FROM domains WHERE id >= ? AND COALESCE(last_crawled,'') = '' ORDER BY id"
+	if limit > 0 {
+		q += " LIMIT " + strconv.Itoa(limit)
+	}
+	rows, err := s.db.Query(q, fromID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DomainRow
+	for rows.Next() {
+		var d DomainRow
+		if err := rows.Scan(&d.ID, &d.Domain); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
 // DomainsToCrawl returns up to limit candidate domains that have never been
 // crawled, in list-rank order (limit <= 0 = all).
 func (s *Store) DomainsToCrawl(limit int) ([]string, error) {
@@ -571,6 +629,8 @@ type Stats struct {
 	Categories     int64  `json:"categories"`
 	LastCrawl      string `json:"last_crawl"`
 	LastDiscovered string `json:"last_discovered"`
+	CrawlCursor    int64  `json:"crawl_cursor"`     // saved scrape position (list rank)
+	PendingDomains int64  `json:"pending_domains"`  // candidates not crawled yet
 	Probed         int64  `json:"probed"`           // entries in the probe ledger
 	ProbedOK       int64  `json:"probed_reachable"` // ledger entries that answered
 }
@@ -613,6 +673,14 @@ func (s *Store) Stats() (Stats, error) {
 	if err := one("SELECT COALESCE(SUM(CASE WHEN reachable THEN 1 ELSE 0 END),0) FROM probes", &st.ProbedOK); err != nil {
 		return st, err
 	}
+	if err := one("SELECT COUNT(*) FROM domains WHERE COALESCE(last_crawled,'') = ''", &st.PendingDomains); err != nil {
+		return st, err
+	}
+	var cursor string
+	if err := one("SELECT COALESCE(MAX(CASE WHEN key = 'scrape.cursor' THEN value END),'0') FROM state", &cursor); err != nil {
+		return st, err
+	}
+	st.CrawlCursor, _ = strconv.ParseInt(cursor, 10, 64)
 	return st, nil
 }
 

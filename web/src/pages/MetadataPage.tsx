@@ -16,6 +16,8 @@ interface Stats {
   last_discovered: string
   probed: number
   probed_reachable: number
+  crawl_cursor: number
+  pending_domains: number
 }
 
 interface Meta {
@@ -100,7 +102,10 @@ export default function MetadataPage() {
           <Stat label="Crawl runs" value={String(s.runs)} />
           <Stat label="Image records" value={String(s.images)} />
           <Stat label="Domain candidates" value={String(s.domains)} />
-          <Stat label="Candidates probed" value={String(s.domains_scored)} />
+          <Stat
+            label="Scrape progress"
+            value={`${s.crawl_cursor.toLocaleString()} cursor · ${s.pending_domains.toLocaleString()} pending`}
+          />
           <Stat label="Categories" value={String(s.categories)} />
           <Stat label="Last crawl" value={s.last_crawl || '—'} />
         </div>

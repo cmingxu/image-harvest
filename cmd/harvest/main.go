@@ -30,6 +30,8 @@ func main() {
 	subdomains := flag.Bool("subdomains", false, "follow links on subdomains of the seed host (default: stay on the seed host)")
 	domainInterval := flag.Duration("domain-interval", 0, "delay between finishing one domain and starting the next")
 	doCrawlDomains := flag.Bool("crawl-domains", false, "crawl every imported domain that has not been crawled yet (rank order), then keep going")
+	domainTimeout := flag.Duration("domain-timeout", 0, "abandon a domain after this long, e.g. 10m (0 = no limit)")
+	crawlOffset := flag.Int("crawl-offset", -1, "with -crawl-domains: list position to start from (-1 = resume from the saved cursor); the position is remembered across restarts")
 	crawlLimit := flag.Int("crawl-limit", 0, "with -crawl-domains: stop after this many domains (0 = all)")
 	dbPath := flag.String("db", "harvest.duckdb", "duckdb metadata file (empty disables)")
 	rehash := flag.Bool("rehash", false, "backfill perceptual hashes for already-saved images, then exit")
@@ -51,9 +53,10 @@ func main() {
 	// request pacing and crawl scope apply to every network-fetching mode
 	crawler.SetInterval(*interval)
 	crawler.SetSubdomains(*subdomains)
+	crawler.SetDomainTimeout(*domainTimeout)
 
 	if *doCrawlDomains {
-		if err := crawlDomains(*dbPath, *out, *depth, *minRes, *quality, *maxPages, *workers, *crawlLimit, *interval, *domainInterval, *requireNetFS); err != nil {
+		if err := crawlDomains(*dbPath, *out, *depth, *minRes, *quality, *maxPages, *workers, *crawlLimit, *crawlOffset, *interval, *domainInterval, *requireNetFS); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -179,11 +182,12 @@ func refreshCategories(dbPath string) error {
 // The list is written in batches, each on its own short-lived connection:
 // DuckDB holds its file lock for the lifetime of a connection, so this is what
 // lets the dashboard keep answering while a million rows are imported.
-// crawlDomains walks the imported domain list and crawls each entry that has not
-// been crawled yet, in rank order. Between domains it waits domainInterval, and
-// every outgoing request is paced by crawler.SetInterval (-interval).
+// crawlDomains crawls the imported domain list, resuming from a saved cursor so
+// a restart continues where it stopped instead of skipping ahead. Each finished
+// domain is marked in the domains table and the cursor is persisted; between
+// domains it waits domainInterval, and every request is paced by -interval.
 // Only images at or above -min are downloaded.
-func crawlDomains(dbPath, out string, depth int, minRes string, quality, maxPages, workers, limit int, interval, domainInterval time.Duration, requireNetFS bool) error {
+func crawlDomains(dbPath, out string, depth int, minRes string, quality, maxPages, workers, limit, offset int, interval, domainInterval time.Duration, requireNetFS bool) error {
 	w, h, err := parseRes(minRes)
 	if err != nil {
 		return fmt.Errorf("bad -min: %w", err)
@@ -194,61 +198,105 @@ func crawlDomains(dbPath, out string, depth int, minRes string, quality, maxPage
 		}
 	}
 
+	// resume position: an explicit -crawl-offset wins and becomes the saved
+	// cursor, otherwise continue where the last run stopped
 	store, err := openWithRetry(dbPath, 20)
 	if err != nil {
 		return err
 	}
-	pending, err := store.DomainsToCrawl(limit)
+	cursor, err := store.Cursor()
+	if err != nil {
+		store.Close()
+		return err
+	}
+	if offset >= 0 {
+		cursor = int64(offset) // list positions are 0-based: offset N starts at rank N+1
+		if err := store.SetCursor(cursor); err != nil {
+			store.Close()
+			return err
+		}
+		fmt.Printf("cursor set to %d (starting at list rank %d)\n", cursor, cursor+1)
+	}
+	pendingCount, err := store.CountToCrawl()
 	store.Close()
 	if err != nil {
 		return err
 	}
-	fmt.Printf("crawl plan: %d domains, depth=%d min=%dx%d quality=%d maxpages=%d workers=%d interval=%s domain-interval=%s\n",
-		len(pending), depth, w, h, quality, maxPages, workers, interval, domainInterval)
-	if len(pending) == 0 {
-		fmt.Println("nothing to crawl: every imported domain already has a last_crawled mark")
-		return nil
-	}
 
-	for i, domain := range pending {
-		started := time.Now()
-		fmt.Printf("[%d/%d] %s %s\n", i+1, len(pending), domain, started.Format("15:04:05"))
+	fmt.Printf("crawl plan: cursor=%d pending=%d depth=%d min=%dx%d quality=%d maxpages=%d workers=%d interval=%s domain-interval=%s domain-timeout=%s\n",
+		cursor, pendingCount, depth, w, h, quality, maxPages, workers, interval, domainInterval, crawler.DomainTimeout())
 
-		res, crawlErr := crawler.Run(domain, depth, w, h, workers, maxPages, quality, out)
-		if crawlErr != nil {
-			fmt.Fprintf(os.Stderr, "  %s: %v\n", domain, crawlErr)
-		} else {
-			fmt.Printf("  pages=%d candidates=%d saved=%d skipped=%d dir=%s (%.0fs)\n",
-				res.Pages, res.Candidates, res.Saved, res.Skipped, res.Dir, time.Since(started).Seconds())
+	processed := 0
+	for {
+		if limit > 0 && processed >= limit {
+			fmt.Printf("stopping: reached -crawl-limit %d\n", limit)
+			return nil
 		}
 
-		// record the run (short-lived connection: the dashboard keeps reading)
-		if s, err := openWithRetry(dbPath, 20); err == nil {
-			saved := res.Saved // zero when the crawl itself failed
-			if _, err := s.InsertRun(harvestdb.Run{
-				Domain:           domain,
-				StartedAt:        started.Format("2006-01-02 15:04:05"),
-				DurationS:        time.Since(started).Seconds(),
-				Depth:            depth,
-				PagesVisited:     res.Pages,
-				ImagesDownloaded: res.Saved,
-			}); err != nil {
-				fmt.Fprintf(os.Stderr, "  db run: %v\n", err)
+		// next batch of un-crawled domains at or after the cursor
+		store, err := openWithRetry(dbPath, 20)
+		if err != nil {
+			return err
+		}
+		batch, err := store.PendingDomains(cursor, 50)
+		store.Close()
+		if err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			fmt.Printf("done: no pending domains left from cursor %d\n", cursor)
+			return nil
+		}
+
+		for _, row := range batch {
+			if limit > 0 && processed >= limit {
+				fmt.Printf("stopping: reached -crawl-limit %d\n", limit)
+				return nil
 			}
-			if err := s.MarkDomainCrawled(domain, time.Now().Format("2006-01-02 15:04:05"), saved); err != nil {
-				fmt.Fprintf(os.Stderr, "  db mark: %v\n", err)
-			}
-			s.Close()
-		} else {
-			fmt.Fprintf(os.Stderr, "  db open: %v\n", err)
-		}
+			processed++
+			started := time.Now()
+			fmt.Printf("[rank %d #%d] %s %s\n", row.ID, processed, row.Domain, started.Format("15:04:05"))
 
-		if i < len(pending)-1 && domainInterval > 0 {
-			fmt.Printf("  waiting %s before the next domain\n", domainInterval)
-			time.Sleep(domainInterval)
+			res, crawlErr := crawler.Run(row.Domain, depth, w, h, workers, maxPages, quality, out)
+			if crawlErr != nil {
+				fmt.Fprintf(os.Stderr, "  %s: %v\n", row.Domain, crawlErr)
+			} else {
+				fmt.Printf("  pages=%d candidates=%d saved=%d skipped=%d dir=%s (%.0fs)\n",
+					res.Pages, res.Candidates, res.Saved, res.Skipped, res.Dir, time.Since(started).Seconds())
+			}
+
+			// record the run, mark the domain and advance the cursor — one short
+			// connection, so the dashboard keeps reading the same file
+			next := row.ID + 1
+			if s, err := openWithRetry(dbPath, 20); err == nil {
+				if _, err := s.InsertRun(harvestdb.Run{
+					Domain:           row.Domain,
+					StartedAt:        started.Format("2006-01-02 15:04:05"),
+					DurationS:        time.Since(started).Seconds(),
+					Depth:            depth,
+					PagesVisited:     res.Pages,
+					ImagesDownloaded: res.Saved,
+				}); err != nil {
+					fmt.Fprintf(os.Stderr, "  db run: %v\n", err)
+				}
+				if err := s.MarkDomainCrawled(row.Domain, time.Now().Format("2006-01-02 15:04:05"), res.Saved); err != nil {
+					fmt.Fprintf(os.Stderr, "  db mark: %v\n", err)
+				}
+				if err := s.SetCursor(next); err != nil {
+					fmt.Fprintf(os.Stderr, "  db cursor: %v\n", err)
+				}
+				s.Close()
+			} else {
+				fmt.Fprintf(os.Stderr, "  db open: %v\n", err)
+			}
+			cursor = next
+
+			if domainInterval > 0 {
+				fmt.Printf("  cursor=%d, waiting %s before the next domain\n", cursor, domainInterval)
+				time.Sleep(domainInterval)
+			}
 		}
 	}
-	return nil
 }
 
 func importDomains(dbPath, list, cachePath string, refresh, reset bool) error {

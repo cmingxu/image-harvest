@@ -67,22 +67,34 @@ func Run(domain string, depth, minW, minH, workers, maxPages, quality int, out s
 		return Result{}, err
 	}
 	start := time.Now()
-	pages, candidates := crawl(seed, depth, workers, maxPages)
 
-	seen := map[string]bool{}
-	unique := make([]string, 0, len(candidates))
-	for _, u := range candidates {
-		if !seen[u] {
-			seen[u] = true
-			unique = append(unique, u)
-		}
-	}
-
+	// The output directory is created up front and images are downloaded page by
+	// page as they are discovered, so files keep landing during a long crawl
+	// instead of only after the whole BFS finishes.
 	dir, err := pickDir(out)
 	if err != nil {
 		return Result{}, err
 	}
-	saved, skipped, recs := downloadAll(unique, dir, filepath.Base(dir), minW, minH, quality, workers)
+	relBase := filepath.Base(dir)
+
+	var mu sync.Mutex
+	var files atomic.Uint32 // shared file counter for the whole run
+	saved, skipped, candidates := 0, 0, 0
+	var recs []harvestdb.Image
+
+	emit := func(urls []string) {
+		mu.Lock()
+		candidates += len(urls)
+		mu.Unlock()
+		s, sk, r := downloadAll(urls, dir, relBase, minW, minH, quality, workers, &files)
+		mu.Lock()
+		saved += s
+		skipped += sk
+		recs = append(recs, r...)
+		mu.Unlock()
+	}
+
+	pages := crawl(seed, depth, workers, maxPages, emit)
 
 	return Result{
 		SeedHost:   seed.Host,
@@ -90,7 +102,7 @@ func Run(domain string, depth, minW, minH, workers, maxPages, quality int, out s
 		Duration:   time.Since(start),
 		Depth:      depth,
 		Pages:      pages,
-		Candidates: len(unique),
+		Candidates: candidates,
 		Saved:      saved,
 		Skipped:    skipped,
 		Images:     recs,
@@ -98,8 +110,7 @@ func Run(domain string, depth, minW, minH, workers, maxPages, quality int, out s
 	}, nil
 }
 
-// pickDir returns a fresh YYYY-MM-DD-HH folder under out; same-hour reruns
-// would overwrite each other, so a -2/-3 suffix is appended as needed.
+// pickDir creates a fresh YYYY-MM-DD-HH(-N) output directory for one run.
 func pickDir(out string) (string, error) {
 	stamp := time.Now().Format("2006-01-02-15")
 	dir := filepath.Join(out, stamp)
@@ -170,6 +181,28 @@ func Subdomains() bool {
 	scopeMu.RLock()
 	defer scopeMu.RUnlock()
 	return allowSubdomains
+}
+
+// --- per-domain budget ----------------------------------------------------
+
+var (
+	domainTimeoutMu sync.RWMutex
+	domainTimeout   time.Duration
+)
+
+// SetDomainTimeout bounds how long one domain may be crawled (0 = unlimited).
+// It keeps a huge or bot-walled site from monopolizing the queue.
+func SetDomainTimeout(d time.Duration) {
+	domainTimeoutMu.Lock()
+	domainTimeout = d
+	domainTimeoutMu.Unlock()
+}
+
+// DomainTimeout reports the per-domain budget.
+func DomainTimeout() time.Duration {
+	domainTimeoutMu.RLock()
+	defer domainTimeoutMu.RUnlock()
+	return domainTimeout
 }
 
 // inScope reports whether a link host may be crawled. With subdomains disabled
@@ -246,14 +279,25 @@ func Get(u string) (*http.Response, error) {
 // guesses which subdomains are worth entering: known service subdomains are
 // skipped entirely, and a fresh subdomain whose first page has no links and
 // no images is marked dead and abandoned.
-func crawl(seed *url.URL, depth, workers, maxPages int) (pages int, imgs []string) {
+func crawl(seed *url.URL, depth, workers, maxPages int, emit func([]string)) int {
 	seedHost := strings.TrimPrefix(seed.Hostname(), "www.")
 	visited := map[string]bool{seed.String(): true}
+	seenImgs := map[string]bool{}
 	seenHost := map[string]bool{}
 	deadHosts := map[string]bool{}
+
+	var deadline time.Time
+	if d := DomainTimeout(); d > 0 {
+		deadline = time.Now().Add(d)
+	}
+	expired := func() bool { return !deadline.IsZero() && time.Now().After(deadline) }
+
 	queue := []string{seed.String()}
 	var mu sync.Mutex
-	for level := 0; level <= depth && len(queue) > 0; level++ {
+	pages := 0
+	stop := false
+
+	for level := 0; level <= depth && len(queue) > 0 && !stop; level++ {
 		var next []string
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, workers)
@@ -265,20 +309,19 @@ func crawl(seed *url.URL, depth, workers, maxPages int) (pages int, imgs []strin
 				defer func() { <-sem }()
 				h := hostOf(u)
 				mu.Lock()
-				if deadHosts[h] || pages >= maxPages {
+				if stop || deadHosts[h] || pages >= maxPages || expired() {
 					mu.Unlock()
 					return
 				}
 				mu.Unlock()
+
 				links, pageImgs := FetchPage(u)
+
 				mu.Lock()
-				defer mu.Unlock()
 				pages++
-				imgs = append(imgs, pageImgs...)
 				if !seenHost[h] {
 					seenHost[h] = true
-					// best guess: a content-free first page means a service
-					// shell, abandon the whole subdomain
+					// a content-free first page means a service shell: abandon host
 					if len(links) == 0 && len(pageImgs) == 0 {
 						deadHosts[h] = true
 					}
@@ -292,12 +335,29 @@ func crawl(seed *url.URL, depth, workers, maxPages int) (pages int, imgs []strin
 						next = append(next, l)
 					}
 				}
+				var fresh []string
+				if !expired() {
+					for _, img := range pageImgs {
+						if !seenImgs[img] {
+							seenImgs[img] = true
+							fresh = append(fresh, img)
+						}
+					}
+				}
+				if expired() {
+					stop = true
+				}
+				mu.Unlock()
+
+				if len(fresh) > 0 {
+					emit(fresh) // download this page's images right away
+				}
 			}(u)
 		}
 		wg.Wait()
 		queue = next
 	}
-	return pages, imgs
+	return pages
 }
 
 func hostOf(u string) string {
@@ -406,18 +466,19 @@ func seedURL(domain string) (*url.URL, error) {
 	return seed, nil
 }
 
-func downloadAll(urls []string, dir, relBase string, minW, minH, quality, workers int) (saved, skipped int, recs []harvestdb.Image) {
+// downloadAll saves a batch of candidate images. counter is shared across the
+// batches of one run so file names never collide (001.jpg, 002.jpg, …).
+func downloadAll(urls []string, dir, relBase string, minW, minH, quality, workers int, counter *atomic.Uint32) (saved, skipped int, recs []harvestdb.Image) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	sem := make(chan struct{}, workers)
-	var n atomic.Uint32
 	for _, u := range urls {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(u string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			img, err := saveImage(u, relBase, dir, n.Add(1), minW, minH, quality)
+			img, err := saveImage(u, relBase, dir, counter.Add(1), minW, minH, quality)
 			mu.Lock()
 			recs = append(recs, img)
 			if err != nil {

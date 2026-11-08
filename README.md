@@ -86,12 +86,23 @@ back in).
 | `QUALITY` | `92` | JPEG quality for webp→jpg |
 | `DEPTH` / `MAX_PAGES` | `2` / `200` | crawl breadth per domain |
 | `SUBDOMAINS` | `0` | keep crawling on the seed host only (no subdomain enumeration) |
+| `DOMAIN_TIMEOUT` | `10m` | abandon one domain after this long (streaming: saved images stay) |
+| `CRAWL_OFFSET` | unset | one-off start position; unset = resume from the saved cursor |
+
+Scrape progress is a **persisted cursor** (`state.scrape.cursor` in DuckDB): every
+finished domain advances it, so a restart continues at the next uncrawled rank
+instead of skipping ahead. `last_crawled` on each domain row is the per-domain
+mark; `-crawl-offset N` overrides the cursor once (e.g. to jump past the
+bot-walled infra at the top of the list) and the new position is remembered.
 
 Identical flags on the CLI:
 
 ```sh
 bin/image-harvest -crawl-domains -interval 1s -domain-interval 10s \
-                  -min 1200x800 -out /mnt/nas/Photos -db harvest.duckdb
+                  -domain-timeout 10m -min 1200x800 \
+                  -out /mnt/nas/Photos -db harvest.duckdb
+# -crawl-offset N   start at list rank N (remembered afterwards)
+# images stream to disk page by page while the crawl is still running
 ```
 
 ## Deploy (systemd)
