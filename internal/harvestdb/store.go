@@ -202,6 +202,13 @@ func (s *Store) InsertRun(r Run) (int64, error) {
 	return id, err
 }
 
+// UpdateRunStats finishes a run row: duration, pages and images.
+func (s *Store) UpdateRunStats(id int64, durationS float64, pages, saved int) error {
+	_, err := s.db.Exec(`UPDATE runs SET duration_s = ?, pages_visited = ?, images_downloaded = ? WHERE id = ?`,
+		durationS, pages, saved, id)
+	return err
+}
+
 // InsertImages stores image rows for one run in a single transaction.
 func (s *Store) InsertImages(runID int64, imgs []Image) error {
 	tx, err := s.db.Begin()

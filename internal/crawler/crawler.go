@@ -103,6 +103,7 @@ func Run(domain string, depth, minW, minH, workers, maxPages, quality int, out s
 		skipped += sk
 		recs = append(recs, r...)
 		mu.Unlock()
+		emitImages(r) // persist rows now, not at the end of the domain
 	}
 
 	pages := crawl(seed, depth, workers, maxPages, emit)
@@ -253,6 +254,31 @@ func Subdomains() bool {
 	scopeMu.RLock()
 	defer scopeMu.RUnlock()
 	return allowSubdomains
+}
+
+// --- incremental image sink -----------------------------------------------
+
+var (
+	sinkMu    sync.RWMutex
+	imageSink func([]harvestdb.Image)
+)
+
+// SetImageSink installs a callback that receives each batch of image records as
+// soon as it is saved, so metadata becomes visible during a long crawl instead
+// of only when the domain finishes. nil disables it.
+func SetImageSink(f func([]harvestdb.Image)) {
+	sinkMu.Lock()
+	imageSink = f
+	sinkMu.Unlock()
+}
+
+func emitImages(imgs []harvestdb.Image) {
+	sinkMu.RLock()
+	f := imageSink
+	sinkMu.RUnlock()
+	if f != nil && len(imgs) > 0 {
+		f(imgs)
+	}
 }
 
 // --- per-request debug log ------------------------------------------------

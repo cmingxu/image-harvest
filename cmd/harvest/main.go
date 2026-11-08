@@ -259,7 +259,38 @@ func crawlDomains(dbPath, out string, depth int, minRes string, quality, maxPage
 			started := time.Now()
 			fmt.Printf("[rank %d #%d] %s %s\n", row.ID, processed, row.Domain, started.Format("15:04:05"))
 
+			// Open the run row before crawling and stream image rows into it as they
+			// are saved, so the dashboard's counters move during a long domain
+			// instead of only when it finishes.
+			runID := int64(0)
+			if s, err := openWithRetry(dbPath, 20); err == nil {
+				id, err := s.InsertRun(harvestdb.Run{
+					Domain:    row.Domain,
+					StartedAt: started.Format("2006-01-02 15:04:05"),
+					Depth:     depth,
+				})
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "  db run: %v\n", err)
+				} else {
+					runID = id
+				}
+				s.Close()
+			}
+			if runID != 0 {
+				crawler.SetImageSink(func(imgs []harvestdb.Image) {
+					s, err := openWithRetry(dbPath, 20)
+					if err != nil {
+						return
+					}
+					if err := s.InsertImages(runID, imgs); err != nil {
+						fmt.Fprintf(os.Stderr, "  db images: %v\n", err)
+					}
+					s.Close()
+				})
+			}
+
 			res, crawlErr := crawler.Run(row.Domain, depth, w, h, workers, maxPages, quality, out)
+			crawler.SetImageSink(nil)
 			if crawlErr != nil {
 				fmt.Fprintf(os.Stderr, "  %s: %v\n", row.Domain, crawlErr)
 			} else {
@@ -275,19 +306,14 @@ func crawlDomains(dbPath, out string, depth int, minRes string, quality, maxPage
 					took, t.WaitS, t.BackoffS, t.ReqS, t.BodyS, other, t.Requests, t.OK, t.Blocked, t.Errors)
 			}
 
-			// record the run, mark the domain and advance the cursor — one short
+			// finish the run row, mark the domain and advance the cursor — one short
 			// connection, so the dashboard keeps reading the same file
 			next := row.ID + 1
 			if s, err := openWithRetry(dbPath, 20); err == nil {
-				if _, err := s.InsertRun(harvestdb.Run{
-					Domain:           row.Domain,
-					StartedAt:        started.Format("2006-01-02 15:04:05"),
-					DurationS:        time.Since(started).Seconds(),
-					Depth:            depth,
-					PagesVisited:     res.Pages,
-					ImagesDownloaded: res.Saved,
-				}); err != nil {
-					fmt.Fprintf(os.Stderr, "  db run: %v\n", err)
+				if runID != 0 {
+					if err := s.UpdateRunStats(runID, time.Since(started).Seconds(), res.Pages, res.Saved); err != nil {
+						fmt.Fprintf(os.Stderr, "  db run stats: %v\n", err)
+					}
 				}
 				if err := s.MarkDomainCrawled(row.Domain, time.Now().Format("2006-01-02 15:04:05"), res.Saved); err != nil {
 					fmt.Fprintf(os.Stderr, "  db mark: %v\n", err)
