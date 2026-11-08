@@ -261,8 +261,16 @@ func crawlDomains(dbPath, out string, depth int, minRes string, quality, maxPage
 			if crawlErr != nil {
 				fmt.Fprintf(os.Stderr, "  %s: %v\n", row.Domain, crawlErr)
 			} else {
+				took := time.Since(started).Seconds()
+				t := res.Timing
+				other := took - t.WaitS - t.BackoffS - t.ReqS - t.BodyS
+				if other < 0 {
+					other = 0
+				}
 				fmt.Printf("  pages=%d candidates=%d saved=%d skipped=%d dir=%s (%.0fs)\n",
-					res.Pages, res.Candidates, res.Saved, res.Skipped, res.Dir, time.Since(started).Seconds())
+					res.Pages, res.Candidates, res.Saved, res.Skipped, res.Dir, took)
+				fmt.Printf("  timing: %.0fs = pace %.1fs + backoff %.1fs + http %.1fs + body %.1fs + other %.1fs | requests %d (200:%d blocked:%d err:%d)\n",
+					took, t.WaitS, t.BackoffS, t.ReqS, t.BodyS, other, t.Requests, t.OK, t.Blocked, t.Errors)
 			}
 
 			// record the run, mark the domain and advance the cursor — one short

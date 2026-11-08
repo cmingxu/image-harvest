@@ -5,11 +5,14 @@ package crawler
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
 	_ "image/png" // register png decoder for DecodeConfig
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -29,10 +32,13 @@ import (
 )
 
 var (
-	client     = newClient()
-	allowedCT  = map[string]bool{"image/jpeg": true, "image/png": true, "image/webp": true}
-	pageLimit  = int64(50 << 20) // cap HTML bodies
-	imageLimit = int64(50 << 20) // cap image bodies
+	client        = newClient()
+	allowedCT     = map[string]bool{"image/jpeg": true, "image/png": true, "image/webp": true}
+	dialTimeout   = 5 * time.Second  // TCP connect (blackholed hosts fail fast)
+	tlsTimeout    = 6 * time.Second  // TLS handshake
+	headerTimeout = 12 * time.Second // first byte, per request
+	pageLimit     = int64(50 << 20)  // cap HTML bodies
+	imageLimit    = int64(50 << 20)  // cap image bodies
 	// realistic browser UA; Go's default "Go-http-client/1.1" gets blocked by many CDNs
 	ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 	// service subdomains that rarely carry site content worth crawling
@@ -57,6 +63,7 @@ type Result struct {
 	Skipped    int
 	Images     []harvestdb.Image
 	Dir        string
+	Timing     Timing
 }
 
 // Run crawls domain up to depth link levels and downloads matching images
@@ -67,6 +74,7 @@ func Run(domain string, depth, minW, minH, workers, maxPages, quality int, out s
 		return Result{}, err
 	}
 	start := time.Now()
+	resetTiming()
 
 	// The output directory is created up front and images are downloaded page by
 	// page as they are discovered, so files keep landing during a long crawl
@@ -86,7 +94,9 @@ func Run(domain string, depth, minW, minH, workers, maxPages, quality int, out s
 		mu.Lock()
 		candidates += len(urls)
 		mu.Unlock()
+		bodyStart := time.Now()
 		s, sk, r := downloadAll(urls, dir, relBase, minW, minH, quality, workers, &files)
+		timing.bodyNs.Add(int64(time.Since(bodyStart)))
 		mu.Lock()
 		saved += s
 		skipped += sk
@@ -107,6 +117,7 @@ func Run(domain string, depth, minW, minH, workers, maxPages, quality int, out s
 		Skipped:    skipped,
 		Images:     recs,
 		Dir:        dir,
+		Timing:     timingSnapshot(time.Since(start)),
 	}, nil
 }
 
@@ -128,15 +139,75 @@ func pickDir(out string) (string, error) {
 
 func newClient() *http.Client {
 	jar, _ := cookiejar.New(nil) // keep cookies across requests (consent walls, sessions)
+	// Split the timeouts: a blocked/blackholed host must fail on connect in a
+	// few seconds instead of burning the whole 15s request budget three times.
+	tr := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   tlsTimeout,
+		ResponseHeaderTimeout: headerTimeout,
+		MaxIdleConnsPerHost:   4,
+		ForceAttemptHTTP2:     true,
+	}
 	return &http.Client{
-		Timeout: 15 * time.Second,
-		Jar:     jar,
+		Timeout:   20 * time.Second,
+		Transport: tr,
+		Jar:       jar,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return fmt.Errorf("too many redirects")
 			}
 			return nil
 		},
+	}
+}
+
+// --- timing breakdown -----------------------------------------------------
+//
+// Every request goes through Get, so that is where the wall clock of a crawl
+// actually goes: pacing sleeps (-interval), retry backoff (403/429/5xx), the
+// HTTP exchange itself, and body reads / decoding. These counters make the
+// split visible per domain.
+type Timing struct {
+	Requests int64   // HTTP attempts, retries included
+	OK       int64   // 200 responses
+	Blocked  int64   // 403/429/5xx
+	Errors   int64   // transport/timeout errors
+	WaitS    float64 // sleeping to honor -interval
+	BackoffS float64 // sleeping between retries
+	ReqS     float64 // HTTP exchange (headers)
+	BodyS    float64 // body read + decode + save
+}
+
+type timingCounters struct {
+	requests, ok, blocked, errs      atomic.Int64
+	waitNs, backoffNs, reqNs, bodyNs atomic.Int64
+}
+
+var timing timingCounters
+
+func resetTiming() {
+	timing.requests.Store(0)
+	timing.ok.Store(0)
+	timing.blocked.Store(0)
+	timing.errs.Store(0)
+	timing.waitNs.Store(0)
+	timing.backoffNs.Store(0)
+	timing.reqNs.Store(0)
+	timing.bodyNs.Store(0)
+}
+
+func timingSnapshot(total time.Duration) Timing {
+	sec := func(ns *atomic.Int64) float64 { return float64(ns.Load()) / 1e9 }
+	return Timing{
+		Requests: timing.requests.Load(),
+		OK:       timing.ok.Load(),
+		Blocked:  timing.blocked.Load(),
+		Errors:   timing.errs.Load(),
+		WaitS:    sec(&timing.waitNs),
+		BackoffS: sec(&timing.backoffNs),
+		ReqS:     sec(&timing.reqNs),
+		BodyS:    sec(&timing.bodyNs),
 	}
 }
 
@@ -238,12 +309,16 @@ func waitTurn() {
 	lastRequest = time.Now()
 }
 
-// get fetches a URL with browser-like headers, retrying 3 times with
-// backoff on 403/429/5xx (the usual bot-protection statuses).
+// get fetches a URL with browser-like headers, retrying up to 3 times with
+// backoff on 403/429/5xx (the usual bot-protection statuses). Transport errors
+// are retried once at most, and timeouts not at all: a blackholed host will not
+// answer on the second attempt either, and each attempt costs seconds.
 func Get(u string) (*http.Response, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
+		paceStart := time.Now()
 		waitTurn() // honor -interval before every request, retries included
+		timing.waitNs.Add(int64(time.Since(paceStart)))
 		req, err := http.NewRequest("GET", u, nil)
 		if err != nil {
 			return nil, err
@@ -251,10 +326,18 @@ func Get(u string) (*http.Response, error) {
 		req.Header.Set("User-Agent", ua)
 		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+		timing.requests.Add(1)
+		reqStart := time.Now()
 		resp, err := client.Do(req)
+		timing.reqNs.Add(int64(time.Since(reqStart)))
 		if err != nil {
+			timing.errs.Add(1)
 			lastErr = err
-			time.Sleep(time.Duration(1<<attempt) * time.Second)
+			if attempt > 0 || isTimeoutErr(err) {
+				break // host is blocked/unreachable: don't pay for more attempts
+			}
+			timing.backoffNs.Add(int64(time.Second))
+			time.Sleep(time.Second)
 			continue
 		}
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusForbidden || resp.StatusCode >= 500 {
@@ -264,14 +347,30 @@ func Get(u string) (*http.Response, error) {
 					wait = time.Duration(secs) * time.Second
 				}
 			}
+			timing.blocked.Add(1)
 			lastErr = fmt.Errorf("status %d", resp.StatusCode)
 			resp.Body.Close()
+			timing.backoffNs.Add(int64(wait))
 			time.Sleep(wait)
 			continue
 		}
+		timing.ok.Add(1)
 		return resp, nil
 	}
 	return nil, lastErr
+}
+
+// isTimeoutErr reports whether err is a connect/read timeout (blocked host).
+func isTimeoutErr(err error) bool {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	var oe *net.OpError
+	if errors.As(err, &oe) {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "i/o timeout")
 }
 
 // crawl BFSes from seed up to depth link levels. Follows links on the seed
