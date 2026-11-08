@@ -108,6 +108,11 @@ CREATE TABLE IF NOT EXISTS domains (
   last_checked TEXT,
   note TEXT DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS probes (
+  domain TEXT PRIMARY KEY,
+  last_probed TEXT NOT NULL,
+  reachable BOOLEAN DEFAULT false
+);
 CREATE TABLE IF NOT EXISTS categories (
   id INTEGER PRIMARY KEY,
   kind TEXT,
@@ -322,7 +327,7 @@ func (s *Store) ListCategories() ([]Category, error) {
 	}
 	return cats, rows.Err()
 }
-func (s *Store) ListDomains() ([]Domain, error) { return s.listDomains(0, 0) }
+func (s *Store) ListDomains() ([]Domain, error) { return s.listDomains(0, 0, "score") }
 
 // CountDomains returns the number of stored candidate domains.
 func (s *Store) CountDomains() (int64, error) {
@@ -331,14 +336,172 @@ func (s *Store) CountDomains() (int64, error) {
 	return n, err
 }
 
-// ListDomainsPage returns one page of candidates, best score first.
-func (s *Store) ListDomainsPage(limit, offset int) ([]Domain, error) {
-	return s.listDomains(limit, offset)
+// Probe is one entry of the discovery ledger: what was tried and when. Keeping
+// failures too is what makes repeated sweeps of the 1M list affordable.
+type Probe struct {
+	Domain     string
+	Reachable  bool
+	LastProbed string
 }
 
-func (s *Store) listDomains(limit, offset int) ([]Domain, error) {
-	const cols = "SELECT id, domain, source, score, img_density, hi_res_ratio, samples, last_checked, note FROM domains ORDER BY score DESC, domain"
-	rows, err := s.db.Query(cols + pageClause(limit, offset))
+// RecordProbes upserts ledger entries for a batch of probe results.
+func (s *Store) RecordProbes(batch []Probe) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`INSERT INTO probes (domain, last_probed, reachable) VALUES (?,?,?)
+		ON CONFLICT (domain) DO UPDATE SET last_probed = excluded.last_probed, reachable = excluded.reachable`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for _, p := range batch {
+		if _, err := stmt.Exec(p.Domain, p.LastProbed, p.Reachable); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ProbedSince returns the domains whose last probe is at or after since
+// (a "2006-01-02 15:04:05" timestamp), so discovery can skip fresh entries.
+func (s *Store) ProbedSince(since string) (map[string]bool, error) {
+	rows, err := s.db.Query("SELECT domain FROM probes WHERE last_probed >= ?", since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := make(map[string]bool, 4096)
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return nil, err
+		}
+		seen[d] = true
+	}
+	return seen, rows.Err()
+}
+
+// ProbeStats returns the ledger size and how many entries are reachable.
+func (s *Store) ProbeStats() (total, reachable int64, err error) {
+	if err = s.db.QueryRow("SELECT COUNT(*), COALESCE(SUM(CASE WHEN reachable THEN 1 ELSE 0 END),0) FROM probes").
+		Scan(&total, &reachable); err != nil {
+		return 0, 0, err
+	}
+	return total, reachable, nil
+}
+
+// ClearDomains empties the candidate domain table (and the probe ledger), used
+// when a fresh list import should replace whatever was there before.
+func (s *Store) ClearDomains() error {
+	for _, q := range []string{"DELETE FROM domains", "DELETE FROM probes"} {
+		if _, err := s.db.Exec(q); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ImportDomains inserts every domain that is not in the table yet and returns
+// how many rows were added. No probing, no scoring: a plain dump of a domain
+// list into DuckDB.
+//
+// Note: DuckDB's file lock is held for as long as a write connection is open, so
+// callers importing a large list should call this per batch on short-lived
+// connections (see cmd/harvest) — that keeps the dashboard able to read.
+func (s *Store) ImportDomains(domains []string, source, stamp string) (int, error) {
+	known, err := s.KnownDomains()
+	if err != nil {
+		return 0, err
+	}
+	fresh := make([]string, 0, len(domains))
+	seen := make(map[string]bool, len(domains))
+	for _, d := range domains {
+		if d == "" || known[d] || seen[d] {
+			continue
+		}
+		seen[d] = true
+		fresh = append(fresh, d)
+	}
+	return s.InsertDomains(fresh, source, stamp)
+}
+
+// InsertDomains inserts domains verbatim (no dedupe against the table) in one
+// transaction and checkpoints the WAL, so a following read-only open works.
+func (s *Store) InsertDomains(batch []string, source, stamp string) (int, error) {
+	if len(batch) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var nextID int64
+	if err := tx.QueryRow("SELECT COALESCE(MAX(id),0)+1 FROM domains").Scan(&nextID); err != nil {
+		return 0, err
+	}
+	stmt, err := tx.Prepare(`INSERT INTO domains (id, domain, source, score, img_density, hi_res_ratio, samples, last_checked, note)
+		VALUES (?,?,?,0,0,0,0,?,'')`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+
+	for _, d := range batch {
+		if _, err := stmt.Exec(nextID, d, source, stamp); err != nil {
+			return 0, err
+		}
+		nextID++
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	// no explicit CHECKPOINT here: the caller closes the connection after each
+	// batch, which folds the WAL back into the file and releases the write lock
+	return len(batch), nil
+}
+
+// KnownDomains returns the set of domains already stored, so discovery can skip
+// work it has already done.
+func (s *Store) KnownDomains() (map[string]bool, error) {
+	rows, err := s.db.Query("SELECT domain FROM domains")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	known := make(map[string]bool, 1024)
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return nil, err
+		}
+		known[d] = true
+	}
+	return known, rows.Err()
+}
+
+// ListDomainsPage returns one page of candidates. sort is "score" (best first,
+// for probed data) or anything else for import order (list rank), which is the
+// meaningful order for a plain 1M-list import and pages much faster.
+func (s *Store) ListDomainsPage(limit, offset int, sort string) ([]Domain, error) {
+	return s.listDomains(limit, offset, sort)
+}
+
+func (s *Store) listDomains(limit, offset int, sort string) ([]Domain, error) {
+	order := "id"
+	if sort == "score" {
+		order = "score DESC, id"
+	}
+	const cols = "SELECT id, domain, source, score, img_density, hi_res_ratio, samples, last_checked, note FROM domains ORDER BY "
+	rows, err := s.db.Query(cols + order + pageClause(limit, offset))
 	if err != nil {
 		return nil, err
 	}
@@ -366,6 +529,8 @@ type Stats struct {
 	Categories     int64  `json:"categories"`
 	LastCrawl      string `json:"last_crawl"`
 	LastDiscovered string `json:"last_discovered"`
+	Probed         int64  `json:"probed"`           // entries in the probe ledger
+	ProbedOK       int64  `json:"probed_reachable"` // ledger entries that answered
 }
 
 // Stats returns row counts and the latest timestamps of the database.
@@ -398,6 +563,12 @@ func (s *Store) Stats() (Stats, error) {
 		return st, err
 	}
 	if err := one("SELECT CAST(COALESCE(MAX(last_checked),'') AS VARCHAR) FROM domains", &st.LastDiscovered); err != nil {
+		return st, err
+	}
+	if err := one("SELECT COUNT(*) FROM probes", &st.Probed); err != nil {
+		return st, err
+	}
+	if err := one("SELECT COALESCE(SUM(CASE WHEN reachable THEN 1 ELSE 0 END),0) FROM probes", &st.ProbedOK); err != nil {
 		return st, err
 	}
 	return st, nil

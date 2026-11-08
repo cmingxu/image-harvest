@@ -33,12 +33,15 @@ MIN_RES=${MIN_RES:-1200x800}                    # only high-resolution images
 QUALITY=${QUALITY:-92}                          # JPEG quality for webp->jpg
 MAX_PAGES=${MAX_PAGES:-200}
 WORKERS=${WORKERS:-4}
-DISCOVER_LIMIT=${DISCOVER_LIMIT:-2000}          # top-1M entries probed per run
+DISCOVER_LIMIT=${DISCOVER_LIMIT:-2000}          # only used by the optional -discover probe
 DISCOVER_OFFSET=${DISCOVER_OFFSET:-0}
-PROBE_TIMEOUT=${PROBE_TIMEOUT:-4s}              # per-domain probe budget
+PROBE_TIMEOUT=${PROBE_TIMEOUT:-2s}              # only used by the optional -discover probe
+DISCOVER_RETRY_AFTER=${DISCOVER_RETRY_AFTER:-336h}
+IMPORT_REFRESH=${IMPORT_REFRESH:-}             # set to 1 to re-download the list on import
 LIST=${LIST:-https://s3-us-west-1.amazonaws.com/umbrella-static/top-1m.csv.zip}
-TIMER=${TIMER:-1}                               # install the daily discovery timer
+TIMER=${IMPORT_TIMER:-1}                        # install the daily import timer
 LIST_SYNC=${LIST_SYNC:-1}                       # upload local top-1m.csv if present
+IMPORT_TIMER=${IMPORT_TIMER:-1}                 # daily domain-list import timer
 NET_FS_TYPES=${NET_FS_TYPES:-cifs|smb3|nfs|nfs4}
 BUILD=${BUILD:-1}
 DRY_RUN=0
@@ -148,6 +151,7 @@ DISCOVER_LIMIT=$DISCOVER_LIMIT
 DISCOVER_OFFSET=$DISCOVER_OFFSET
 PROBE_TIMEOUT=$PROBE_TIMEOUT
 LIST=$LIST
+IMPORT_REFRESH=$IMPORT_REFRESH
 EOF
 )
 if [ "$DRY_RUN" = 1 ]; then
@@ -183,10 +187,10 @@ else
   ssh "$DEPLOY_HOST" "mkdir -p ~/.config/systemd/user"
   scp -q /tmp/"$SERVICE".service "$DEPLOY_HOST:.config/systemd/user/$SERVICE.service"
 
-  # discovery service + daily timer
-  sed -e "s|__APP_DIR__|$REMOTE_ABS|g" "$ROOT/deploy/image-harvest-discover.service" > /tmp/image-harvest-discover.service
-  scp -q /tmp/image-harvest-discover.service "$DEPLOY_HOST:.config/systemd/user/image-harvest-discover.service"
-  scp -q "$ROOT/deploy/image-harvest-discover.timer" "$DEPLOY_HOST:.config/systemd/user/image-harvest-discover.timer"
+  # domain-list import service + daily timer
+  sed -e "s|__APP_DIR__|$REMOTE_ABS|g" "$ROOT/deploy/image-harvest-import.service" > /tmp/image-harvest-import.service
+  scp -q /tmp/image-harvest-import.service "$DEPLOY_HOST:.config/systemd/user/image-harvest-import.service"
+  scp -q "$ROOT/deploy/image-harvest-import.timer" "$DEPLOY_HOST:.config/systemd/user/image-harvest-import.timer"
 fi
 
 # ---------------------------------------------------------------- start it
@@ -198,14 +202,22 @@ rsh "export XDG_RUNTIME_DIR=/run/user/\$(id -u)
   sleep 2
   systemctl --user --no-pager --lines=20 status $SERVICE.service || true"
 
-log "discovery timer"
-if [ "$TIMER" = 1 ]; then
+# retire units from earlier revisions (probing sweep / discover timer)
+rsh "export XDG_RUNTIME_DIR=/run/user/\$(id -u)
+  for u in image-harvest-sweep.service image-harvest-discover.timer image-harvest-discover.service; do
+    systemctl --user disable --now \$u >/dev/null 2>&1 || true
+    rm -f ~/.config/systemd/user/\$u
+  done
+  pkill -f 'harvest -disc[o]ver' >/dev/null 2>&1 || true
+  systemctl --user daemon-reload"
+
+log "domain-list import timer"
+if [ "$IMPORT_TIMER" = 1 ]; then
   rsh "export XDG_RUNTIME_DIR=/run/user/\$(id -u)
-    systemctl --user daemon-reload
-    systemctl --user enable --now image-harvest-discover.timer
-    systemctl --user list-timers image-harvest-discover.timer --no-pager | head -3"
+    systemctl --user enable --now image-harvest-import.timer
+    systemctl --user list-timers image-harvest-import.timer --no-pager | head -3"
 else
-  rsh "export XDG_RUNTIME_DIR=/run/user/\$(id -u); systemctl --user disable --now image-harvest-discover.timer || true"
+  rsh "export XDG_RUNTIME_DIR=/run/user/\$(id -u); systemctl --user disable --now image-harvest-import.timer || true"
 fi
 
 # linger so the unit survives logout / starts at boot (needs polkit auth once)

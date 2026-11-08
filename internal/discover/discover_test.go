@@ -75,13 +75,19 @@ func TestRunScoring(t *testing.T) {
 	defer store.Close()
 
 	// probe dense, sparse, and one unreachable domain from a "top list"
+	// mimic the CLI: reachable probes become candidates, every attempt is
+	// recorded in the probe ledger
 	sink := func(batch []harvestdb.Domain) error {
+		probes := make([]harvestdb.Probe, 0, len(batch))
 		for _, d := range batch {
-			if _, err := store.UpsertDomain(d); err != nil {
-				return err
+			if Reachable(d) {
+				if _, err := store.UpsertDomain(d); err != nil {
+					return err
+				}
 			}
+			probes = append(probes, harvestdb.Probe{Domain: d.Domain, Reachable: Reachable(d), LastProbed: d.LastChecked})
 		}
-		return nil
+		return store.RecordProbes(probes)
 	}
 	domains, err := Run(sink, []string{srvD.URL, srvS.URL, "http://127.0.0.1:1"},
 		Options{Workers: 2, Limit: 10, Timeout: 2 * time.Second})
@@ -107,6 +113,35 @@ func TestRunScoring(t *testing.T) {
 		if d.Domain == "http://127.0.0.1:1" {
 			t.Fatalf("unreachable domain must not be stored: %+v", d)
 		}
+	}
+
+	// every attempt lands in the ledger, including failures
+	probedTotal, probedOK, err := store.ProbeStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probedTotal != 3 || probedOK != 2 {
+		t.Fatalf("probe ledger = %d total / %d reachable, want 3/2", probedTotal, probedOK)
+	}
+
+	// domains already in the db must not be probed again
+	known, err := store.KnownDomains()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(known) != 2 {
+		t.Fatalf("want 2 known domains, got %v", known)
+	}
+	var upserts int
+	trackSink := func(batch []harvestdb.Domain) error {
+		upserts += len(batch)
+		return nil
+	}
+	if _, err := Run(trackSink, []string{srvD.URL, srvS.URL}, Options{Workers: 2, Timeout: time.Second, Known: known}); err != nil {
+		t.Fatal(err)
+	}
+	if upserts != 0 {
+		t.Fatalf("known domains were probed again: %d upserts", upserts)
 	}
 }
 

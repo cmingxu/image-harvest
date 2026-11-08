@@ -14,6 +14,8 @@ interface Stats {
   categories: number
   last_crawl: string
   last_discovered: string
+  probed: number
+  probed_reachable: number
 }
 
 interface Meta {
@@ -94,17 +96,18 @@ export default function MetadataPage() {
 
       <section className="space-y-3">
         <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Dataset</h2>
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
           <Stat label="Crawl runs" value={String(s.runs)} />
           <Stat label="Image records" value={String(s.images)} />
           <Stat label="Domain candidates" value={String(s.domains)} />
-          <Stat label="Candidates scored" value={String(s.domains_scored)} />
+          <Stat label="Candidates probed" value={String(s.domains_scored)} />
           <Stat label="Categories" value={String(s.categories)} />
           <Stat label="Last crawl" value={s.last_crawl || '—'} />
         </div>
         <p className="text-xs text-muted-foreground">
-          Domain candidates come from the top-1M list: every entry is probed and only network-reachable
-          sites are kept. Last discovery: <strong>{s.last_discovered || 'never'}</strong>
+          Domain candidates are imported straight from the top-1M list (parse + insert only, no probing).
+          Re-imports skip domains that are already stored. Last import:{' '}
+          <strong>{s.last_discovered || 'never'}</strong>
         </p>
       </section>
 

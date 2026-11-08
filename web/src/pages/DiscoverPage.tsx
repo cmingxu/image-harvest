@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import Pagination from '../components/Pagination'
+import { fetchJSON } from '../lib/api'
 import {
   Table,
   TableBody,
@@ -26,12 +27,11 @@ export default function DiscoverPage() {
   const [domains, setDomains] = useState<Domain[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
-  const [limit, setLimit] = useState(50)
+  const [limit, setLimit] = useState(100)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    fetch(`/api/domains?page=${page}&limit=${limit}`)
-      .then((r) => r.json())
+    fetchJSON<{ domains?: Domain[]; total?: number }>(`/api/domains?page=${page}&limit=${limit}`)
       .then((d) => {
         setDomains(d.domains ?? [])
         setTotal(d.total ?? 0)
@@ -47,42 +47,35 @@ export default function DiscoverPage() {
     <div className="space-y-4">
       <div className="flex items-baseline justify-between">
         <h1 className="text-xl font-semibold">Candidate domains</h1>
-        <span className="text-sm text-muted-foreground">{total.toLocaleString()} reachable candidates</span>
+        <span className="text-sm text-muted-foreground">{total.toLocaleString()} domains</span>
       </div>
       <p className="text-sm text-muted-foreground">
-        Probing measures homepage image density and samples a few images for resolution. Run{' '}
-        <code className="rounded bg-muted px-1">image-harvest -discover</code> to refresh.
+        Imported straight from the top-1M list — no connectivity probing, no page evaluation. Refresh with{' '}
+        <code className="rounded bg-muted px-1">./scripts/import-domains.sh</code> (also runs daily).
       </p>
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>#</TableHead>
+            <TableHead className="w-24">#</TableHead>
             <TableHead>Domain</TableHead>
-            <TableHead>Score</TableHead>
-            <TableHead className="text-right">Density</TableHead>
-            <TableHead className="text-right">Hi-res</TableHead>
-            <TableHead>Last checked</TableHead>
-            <TableHead>Note</TableHead>
+            <TableHead>Source</TableHead>
+            <TableHead>Imported</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {domains.map((d, i) => (
             <TableRow key={d.id}>
-              <TableCell>{(page - 1) * limit + i + 1}</TableCell>
+              <TableCell className="text-muted-foreground">{(page - 1) * limit + i + 1}</TableCell>
               <TableCell className="font-medium">{d.domain}</TableCell>
-              <TableCell>{d.score.toFixed(1)}</TableCell>
-              <TableCell className="text-right">{d.img_density}</TableCell>
-              <TableCell className="text-right">{(d.hi_res_ratio * 100).toFixed(0)}%</TableCell>
-              <TableCell>{d.last_checked}</TableCell>
-              <TableCell className="max-w-[240px] truncate text-muted-foreground" title={d.note}>
-                {d.note}
-              </TableCell>
+              <TableCell className="text-muted-foreground">{d.source || '—'}</TableCell>
+              <TableCell className="text-muted-foreground">{d.last_checked}</TableCell>
             </TableRow>
           ))}
           {domains.length === 0 && (
             <TableRow>
-              <TableCell colSpan={7} className="py-8 text-center text-muted-foreground">
-                No domains probed yet — run <code className="rounded bg-muted px-1">image-harvest -discover</code>.
+              <TableCell colSpan={4} className="py-8 text-center text-muted-foreground">
+                No domains imported yet — run{' '}
+                <code className="rounded bg-muted px-1">./scripts/import-domains.sh</code>.
               </TableCell>
             </TableRow>
           )}
@@ -98,6 +91,7 @@ export default function DiscoverPage() {
           setPage(1)
         }}
         label="domains"
+        pageSizes={[50, 100, 200, 500]}
       />
     </div>
   )

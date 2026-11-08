@@ -147,7 +147,7 @@ func NewRouter(open Opener, out string, meta func() Meta) *gin.Engine {
 
 	api.GET("/domains", withStore(open, func(c *gin.Context, store *harvestdb.Store) {
 		limit, offset := pageParams(c, 50, 500)
-		domains, err := store.ListDomainsPage(limit, offset)
+		domains, err := store.ListDomainsPage(limit, offset, c.DefaultQuery("sort", "id"))
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

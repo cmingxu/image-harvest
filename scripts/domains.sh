@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Print (or save) the domain candidates stored in DuckDB on the deploy host,
-# best first. Only domains that answered during discovery are in the table.
+# in list-rank order (the order they were imported from top-1M).
 #
 #   ./scripts/domains.sh                        # top 50 to stdout
 #   ./scripts/domains.sh -n 500 > domains.txt   # more, to a file
@@ -33,7 +33,7 @@ n, csv = int(sys.argv[1]), sys.argv[2] == "1"
 # the API is paginated: walk it in 500-row pages (0 = fetch everything)
 rows, page = [], 1
 while True:
-    url = f"http://127.0.0.1:8088/api/domains?limit=500&page={page}"
+    url = f"http://127.0.0.1:8088/api/domains?limit=500&page={page}&sort=id"
     with urllib.request.urlopen(url, timeout=60) as r:
         payload = json.load(r)
     chunk = [d for d in payload["domains"] if d["domain"]]

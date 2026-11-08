@@ -1,0 +1,24 @@
+[Unit]
+Description=image-harvest domain list import (top-1M → DuckDB)
+Documentation=https://github.com/cmingxu/image-harvest
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=__APP_DIR__/config.env
+# Parses the domain list and dumps every domain into DuckDB. No connectivity
+# probing, no page-content evaluation — pure parse + insert. Domains already in
+# the table are left alone, so re-running is idempotent.
+ExecStart=/bin/sh -c 'exec __APP_DIR__/bin/image-harvest -import-domains \
+  -db __APP_DIR__/data/harvest.duckdb \
+  -list "${LIST:-https://s3-us-west-1.amazonaws.com/umbrella-static/top-1m.csv.zip}" \
+  -list-cache __APP_DIR__/data/top-1m.csv \
+  ${IMPORT_REFRESH:+-refresh}'
+Nice=10
+StandardOutput=append:__APP_DIR__/logs/import.log
+StandardError=append:__APP_DIR__/logs/import.log
+
+[Install]
+WantedBy=default.target

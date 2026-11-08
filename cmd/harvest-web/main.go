@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"image-harvest/internal/harvestdb"
 	"image-harvest/internal/web"
@@ -22,11 +23,17 @@ func main() {
 	// The dashboard only reads. Each request opens its own short-lived read-only
 	// connection so a crawl run can take the single DuckDB write lock in between.
 	open := func() (*harvestdb.Store, func(), error) {
-		store, err := harvestdb.OpenReadOnly(*dbPath)
-		if err != nil {
-			return nil, nil, err
+		// a crawl or list import may hold DuckDB's write lock for a moment;
+		// retry briefly instead of failing the request
+		var err error
+		for attempt := 0; attempt < 40; attempt++ {
+			var store *harvestdb.Store
+			if store, err = harvestdb.OpenReadOnly(*dbPath); err == nil {
+				return store, func() { store.Close() }, nil
+			}
+			time.Sleep(150 * time.Millisecond)
 		}
-		return store, func() { store.Close() }, nil
+		return nil, nil, err
 	}
 
 	absOut, err := filepath.Abs(*out)
@@ -37,12 +44,23 @@ func main() {
 		log.Fatalf("out dir %s not found", *out)
 	}
 
-	// create the database up front so read-only opens always have a file
+	// Open the database once in read-write mode at startup: this creates it if
+	// missing and, more importantly, replays/checkpoints a leftover write-ahead
+	// log (e.g. after a crawl or list import was interrupted). Read-only opens
+	// cannot replay a WAL, so without this the dashboard would serve nothing.
 	if _, statErr := os.Stat(*dbPath); statErr != nil {
 		if s, err := harvestdb.Open(*dbPath); err == nil {
 			s.Close()
 		} else {
 			log.Printf("could not create %s: %v", *dbPath, err)
+		}
+	} else if _, walErr := os.Stat(*dbPath + ".wal"); walErr == nil {
+		log.Printf("found %s.wal, replaying and checkpointing", *dbPath)
+		if s, err := harvestdb.Open(*dbPath); err == nil {
+			s.Close()
+			log.Printf("wal replayed")
+		} else {
+			log.Printf("wal replay failed: %v", err)
 		}
 	}
 

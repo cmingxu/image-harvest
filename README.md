@@ -25,15 +25,22 @@ Only high-resolution images are kept: candidates smaller than `-min`
 only).
 
 ```sh
-bin/image-harvest -discover [-discover-limit 2000] [-discover-offset 0] \
-                  [-list <file|url>] [-refresh] [-workers 4]
+bin/image-harvest -import-domains [-list <file|url>] [-list-cache top-1m.csv] \
+                  [-refresh] [-import-reset]
 ```
 
-Discovery walks the top-1M list, probes each domain and stores **only the
-network-reachable ones** in the `domains` table (score = image density ×
-(1 + hi-res ratio)), so the dashboard's Discover page is a list of usable crawl
-targets. Results are written in small batches on short-lived connections, so a
-long discovery run never blocks the dashboard.
+Domain discovery is a **pure list import**: the top-1M CSV is parsed and every
+domain is dumped into the `domains` table. No connectivity tests, no page
+content evaluation. Domains already stored are skipped, so re-importing is
+idempotent; `-import-reset` wipes the table first.
+
+The import writes in 1000-row batches, each on its own short-lived connection,
+because DuckDB holds its file lock for the lifetime of a connection — that keeps
+the dashboard answering while a million rows are imported (~5 min for 1M).
+
+The older network-probing mode is still available (`-discover`, which measures
+homepage image density and hi-res ratio into the same table) but is off by
+default.
 
 - BFS crawl, seed domain + subdomains; service subdomains (mail., api., …)
   are skipped and content-free subdomains are abandoned after one probe page.
@@ -50,7 +57,7 @@ bin/harvest-web -db harvest.duckdb -out .   # http://localhost:8080
 - Runs list: domain, time, depth, pages visited, images downloaded.
 - All list views are paginated server-side (`?page=&limit=`, capped at 500) and
   return `total`, so the UI can page through runs, images and the candidate
-  domain list (hundreds of thousands of rows after a full sweep).
+  domain list (~1M rows).
 - **Metadata** page: DuckDB path/size, media root, saved/skipped image counts,
   total bytes, candidate-domain counts, last crawl/discovery, and the effective
   crawl config (depth, min resolution, quality, pages, workers).
@@ -82,9 +89,9 @@ automatically through `GOPROXY` (`https://goproxy.cn,direct` by default).
 | `QUALITY` | `92` | JPEG quality for webp→jpg |
 | `MAX_PAGES` | `200` | page cap per crawl |
 | `WORKERS` | `4` | concurrent fetches |
-| `DISCOVER_LIMIT` | `2000` | top-1M entries probed per discovery run |
-| `DISCOVER_OFFSET` | `0` | starting rank (the timer rotates it by day) |
-| `TIMER` | `1` | install/enable the daily discovery timer |
+| `LIST` | Umbrella top-1M zip | domain list to import |
+| `IMPORT_REFRESH` | unset | `1` = re-download the list on each import |
+| `IMPORT_TIMER` | `1` | install/enable the daily import timer |
 
 `config.env` on the host is the single source of truth for these; the dashboard
 shows them on the **Metadata** page. Edit the defaults in `scripts/deploy.sh`
@@ -120,18 +127,18 @@ Three guards, all on by default:
 ```sh
 ./scripts/crawl.sh www.nipic.com                            # uses config.env
 ./scripts/crawl.sh -depth 1 -min 1600x1200 example.com      # per-run override
-./scripts/discover.sh -discover-limit 500                   # refresh candidates
-./scripts/sweep.sh                                          # whole 1M list (detached)
+./scripts/import-domains.sh                                  # top-1M → duckdb (no probing)
+./scripts/import-domains.sh --refresh                       # re-download the list first
+./scripts/import-domains.sh --reset                         # wipe table, import fresh
 ./scripts/domains.sh -n 200 > domains.txt                   # dump candidates
 ```
 
-`PROBE_TIMEOUT` (default `4s`) is the per-domain budget; short timeouts plus many
-workers (`SWEEP_WORKERS`, default 96) are what make sweeping all 1M entries
-practical. A sweep logs to `logs/sweep.log` and keeps only reachable domains.
+The import logs to `logs/import.log` and also runs daily from
+`image-harvest-import.timer`. `./scripts/discover.sh` is the optional
+network-probing variant.
 
 Images are written to `$MEDIA_ROOT`, metadata to `data/harvest.duckdb`
-(local disk, ~3 MB, never on the NAS). Domain discovery also runs daily from
-`image-harvest-discover.timer` and logs to `logs/discover.log`.
+(local disk, ~3 MB, never on the NAS). The domain list import also runs daily from `image-harvest-import.timer`.
 
 ### Ops
 

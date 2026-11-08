@@ -48,6 +48,9 @@ type Options struct {
 	Limit   int           // entries to probe (0 = whole list)
 	Offset  int           // starting rank
 	Timeout time.Duration // per-request budget (DefaultTimeout when 0)
+	// Known holds domains already present in the database. Entries found here
+	// are not probed again (see -discover-force to override).
+	Known map[string]bool
 }
 
 var probeClient = &http.Client{Timeout: DefaultTimeout}
@@ -128,9 +131,11 @@ func unzipFirst(data []byte) ([]byte, error) {
 	return nil, fmt.Errorf("empty zip")
 }
 
-// Sink persists a batch of probe results. It is called every few domains so a
-// long discovery run never holds the DuckDB write lock: the dashboard can keep
-// serving from the same file while discovery works through thousands of domains.
+// Sink persists a batch of probe results — every probed domain, reachable or
+// not, so the caller can both store candidates and keep a probe ledger. It is
+// called every few domains so a long discovery run never holds the DuckDB write
+// lock: the dashboard keeps serving while discovery works through thousands of
+// domains.
 type Sink func(batch []harvestdb.Domain) error
 
 // Run probes list[offset:offset+limit] with workers goroutines and hands the
@@ -160,12 +165,21 @@ func Run(sink Sink, list []string, opts Options) ([]harvestdb.Domain, error) {
 	cands := list[offset:end]
 
 	start := time.Now()
+	// normalize the known set: list entries are bare domains, stored ones may
+	// have kept a scheme if they were probed from a URL list
+	var known map[string]bool
+	if opts.Known != nil {
+		known = make(map[string]bool, len(opts.Known))
+		for d := range opts.Known {
+			known[normalizeDomain(d)] = true
+		}
+	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, workers)
 	probed := make([]harvestdb.Domain, 0, len(cands))
 	pending := make([]harvestdb.Domain, 0, batchSize)
-	stored, unreachable := 0, 0
+	stored, unreachable, alreadyKnown := 0, 0, 0
 
 	flush := func(force bool) error {
 		if len(pending) == 0 || (len(pending) < batchSize && !force) {
@@ -182,6 +196,15 @@ func Run(sink Sink, list []string, opts Options) ([]harvestdb.Domain, error) {
 		go func(d string) {
 			defer wg.Done()
 			defer func() { <-sem }()
+
+			// already in DuckDB: nothing to learn, don't probe it again
+			if known[normalizeDomain(d)] {
+				mu.Lock()
+				alreadyKnown++
+				mu.Unlock()
+				return
+			}
+
 			dom := probe(client, d)
 			dom.Source = "top-1m"
 			dom.LastChecked = time.Now().Format("2006-01-02 15:04:05")
@@ -189,11 +212,11 @@ func Run(sink Sink, list []string, opts Options) ([]harvestdb.Domain, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			probed = append(probed, dom)
-			if dom.Note != "" && dom.ImgDensity == 0 {
+			if Reachable(dom) {
+				stored++
+			} else {
 				unreachable++ // no answer / not an HTML page: not a candidate
-				return
 			}
-			stored++
 			pending = append(pending, dom)
 			if err := flush(false); err != nil {
 				fmt.Fprintf(os.Stderr, "warn: store probe batch: %v\n", err)
@@ -211,8 +234,8 @@ func Run(sink Sink, list []string, opts Options) ([]harvestdb.Domain, error) {
 	}
 
 	scored := scoredSoFar(probed)
-	fmt.Printf("probed %d candidates: %d reachable (stored), %d unreachable (dropped), %d scored\n",
-		len(cands), stored, unreachable, scored)
+	fmt.Printf("probing %d entries: %d reachable (stored), %d unreachable (dropped), %d already in db (skipped), %d scored %.0f/s\n",
+		len(cands), stored, unreachable, alreadyKnown, scored, float64(len(cands))/time.Since(start).Seconds())
 
 	sort.SliceStable(probed, func(i, j int) bool { return probed[i].Score > probed[j].Score })
 	return probed, nil
@@ -336,6 +359,18 @@ func firstSrcset(n *html.Node) string {
 		}
 	}
 	return ""
+}
+
+// Reachable reports whether a probe result counts as a usable crawl candidate:
+// the domain answered and served an HTML page with at least one image.
+func Reachable(d harvestdb.Domain) bool { return d.ImgDensity > 0 }
+
+// normalizeDomain strips the scheme and any trailing dot so list entries line up
+// with the domains already stored in the database.
+func normalizeDomain(d string) string {
+	d = strings.TrimPrefix(strings.TrimPrefix(d, "https://"), "http://")
+	d = strings.TrimSuffix(d, "/")
+	return strings.ToLower(strings.TrimSuffix(d, "."))
 }
 
 // scoredSoFar counts domains with a positive score.

@@ -3,7 +3,7 @@ BIN ?= bin
 WEB_DIR ?= web
 DOMAIN ?= ifeng.com
 
-.PHONY: all build build-web test vet run-harvest run-server clean deploy crawl discover sweep domains
+.PHONY: all build build-web test vet run-harvest run-server clean deploy crawl import domains
 
 all: build build-web
 
@@ -40,11 +40,11 @@ deploy:
 crawl:
 	./scripts/crawl.sh $(ARGS)
 
-discover:
-	./scripts/discover.sh $(ARGS)
+import:           # dump the top-1M list into duckdb (no probing)
+	./scripts/import-domains.sh $(ARGS)
 
-sweep:            # probe the whole top-1M list (detached, chunked)
-	./scripts/sweep.sh $(ARGS)
+discover:         # optional: probe domains for image density (network heavy)
+	./scripts/discover.sh $(ARGS)
 
 domains:          # list stored candidate domains (ARGS="-n 500" / "-csv")
 	./scripts/domains.sh $(ARGS)
