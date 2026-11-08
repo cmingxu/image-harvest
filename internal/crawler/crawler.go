@@ -732,6 +732,7 @@ func saveImage(u, relBase, dir string, idx uint32, minW, minH, quality int) (har
 	img.SizeBytes = int64(len(data))
 	if decoded, _, err := image.Decode(bytes.NewReader(data)); err == nil {
 		img.Phash = int64(phash.DHash(decoded))
+		img.Vhash = int64(phash.DHashVertical(decoded))
 	}
 	writeErr := os.WriteFile(filepath.Join(dir, name), data, 0o644)
 	if writeErr == nil {
@@ -751,8 +752,8 @@ func RehashSaved(store *harvestdb.Store, out string) (int, error) {
 	}
 	hashed := 0
 	for _, im := range imgs {
-		if im.Phash != 0 {
-			continue
+		if im.Phash != 0 && im.Vhash != 0 {
+			continue // both hashes present
 		}
 		data, err := os.ReadFile(filepath.Join(out, im.SavedPath))
 		if err != nil {
@@ -762,7 +763,7 @@ func RehashSaved(store *harvestdb.Store, out string) (int, error) {
 		if err != nil {
 			continue
 		}
-		if err := store.SetPhash(im.ID, int64(phash.DHash(m))); err != nil {
+		if err := store.SetPhash(im.ID, int64(phash.DHash(m)), int64(phash.DHashVertical(m))); err != nil {
 			return hashed, err
 		}
 		hashed++

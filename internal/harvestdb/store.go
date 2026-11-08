@@ -4,6 +4,7 @@ package harvestdb
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -37,7 +38,8 @@ type Image struct {
 	SavedPath string `json:"saved_path"`
 	SizeBytes int64  `json:"size_bytes"`
 	Skipped   string `json:"skipped"`
-	Phash     int64  `json:"-"`
+	Phash     int64  `json:"-"` // horizontal dHash
+	Vhash     int64  `json:"-"` // vertical dHash
 }
 
 // Similar is an Image paired with its perceptual distance to a query image.
@@ -96,7 +98,8 @@ CREATE TABLE IF NOT EXISTS images (
   saved_path TEXT,
   size_bytes INTEGER DEFAULT 0,
   skipped TEXT DEFAULT '',
-  phash BIGINT DEFAULT 0
+  phash BIGINT DEFAULT 0,
+  vhash BIGINT DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS domains (
   id INTEGER PRIMARY KEY,
@@ -158,6 +161,7 @@ func Open(path string) (*Store, error) {
 	// migrations for databases created before these columns existed
 	for _, mig := range []string{
 		"ALTER TABLE images ADD COLUMN IF NOT EXISTS phash BIGINT DEFAULT 0",
+		"ALTER TABLE images ADD COLUMN IF NOT EXISTS vhash BIGINT DEFAULT 0",
 		"ALTER TABLE domains ADD COLUMN IF NOT EXISTS last_crawled TEXT DEFAULT ''",
 	} {
 		if _, err := db.Exec(mig); err != nil {
@@ -245,9 +249,9 @@ func (s *Store) InsertImages(runID int64, imgs []Image) error {
 		if err := tx.QueryRow("SELECT COALESCE(MAX(id),0)+1 FROM images").Scan(&id); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO images (id, run_id, url, width, height, ext, saved_path, size_bytes, skipped, phash)
-			VALUES (?,?,?,?,?,?,?,?,?,?)`,
-			id, runID, im.URL, im.Width, im.Height, im.Ext, im.SavedPath, im.SizeBytes, im.Skipped, im.Phash); err != nil {
+		if _, err := tx.Exec(`INSERT INTO images (id, run_id, url, width, height, ext, saved_path, size_bytes, skipped, phash, vhash)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			id, runID, im.URL, im.Width, im.Height, im.Ext, im.SavedPath, im.SizeBytes, im.Skipped, im.Phash, im.Vhash); err != nil {
 			return err
 		}
 	}
@@ -739,7 +743,7 @@ func (s *Store) CountImages(runID int64, filter string) (int64, error) {
 
 // ListImagesPage returns one page of a run's images (limit <= 0 = all).
 func (s *Store) ListImagesPage(runID int64, filter string, limit, offset int) ([]Image, error) {
-	q := "SELECT id, run_id, url, width, height, ext, saved_path, size_bytes, skipped, phash FROM images WHERE run_id = ?" +
+	q := "SELECT id, run_id, url, width, height, ext, saved_path, size_bytes, skipped, phash, vhash FROM images WHERE run_id = ?" +
 		imageFilterSQL(filter) + " ORDER BY id" + pageClause(limit, offset)
 	rows, err := s.db.Query(q, runID)
 	if err != nil {
@@ -749,7 +753,7 @@ func (s *Store) ListImagesPage(runID int64, filter string, limit, offset int) ([
 	var imgs []Image
 	for rows.Next() {
 		var im Image
-		if err := rows.Scan(&im.ID, &im.RunID, &im.URL, &im.Width, &im.Height, &im.Ext, &im.SavedPath, &im.SizeBytes, &im.Skipped, &im.Phash); err != nil {
+		if err := rows.Scan(&im.ID, &im.RunID, &im.URL, &im.Width, &im.Height, &im.Ext, &im.SavedPath, &im.SizeBytes, &im.Skipped, &im.Phash, &im.Vhash); err != nil {
 			return nil, err
 		}
 		imgs = append(imgs, im)
@@ -760,8 +764,8 @@ func (s *Store) ListImagesPage(runID int64, filter string, limit, offset int) ([
 // GetImage returns one image by id.
 func (s *Store) GetImage(id int64) (*Image, error) {
 	var im Image
-	err := s.db.QueryRow("SELECT id, run_id, url, width, height, ext, saved_path, size_bytes, skipped, phash FROM images WHERE id = ?", id).
-		Scan(&im.ID, &im.RunID, &im.URL, &im.Width, &im.Height, &im.Ext, &im.SavedPath, &im.SizeBytes, &im.Skipped, &im.Phash)
+	err := s.db.QueryRow("SELECT id, run_id, url, width, height, ext, saved_path, size_bytes, skipped, phash, vhash FROM images WHERE id = ?", id).
+		Scan(&im.ID, &im.RunID, &im.URL, &im.Width, &im.Height, &im.Ext, &im.SavedPath, &im.SizeBytes, &im.Skipped, &im.Phash, &im.Vhash)
 	if err != nil {
 		return nil, err
 	}
@@ -770,39 +774,56 @@ func (s *Store) GetImage(id int64) (*Image, error) {
 
 // SavedImages returns all saved images (used by the phash backfill).
 func (s *Store) SavedImages() ([]Image, error) {
-	return s.queryImages("SELECT id, run_id, url, width, height, ext, saved_path, size_bytes, skipped, phash FROM images WHERE skipped = '' ORDER BY id")
+	return s.queryImages("SELECT id, run_id, url, width, height, ext, saved_path, size_bytes, skipped, phash, vhash FROM images WHERE skipped = '' ORDER BY id")
 }
 
 // SetPhash stores the perceptual hash of image id (0 clears it).
-func (s *Store) SetPhash(id, phashVal int64) error {
-	_, err := s.db.Exec("UPDATE images SET phash = ? WHERE id = ?", phashVal, id)
+func (s *Store) SetPhash(id, phashVal, vhashVal int64) error {
+	_, err := s.db.Exec("UPDATE images SET phash = ?, vhash = ? WHERE id = ?", phashVal, vhashVal, id)
 	return err
 }
 
 // SimilarImages returns saved images whose perceptual hash is within maxDist
 // bits of phashVal, closest first. runID > 0 restricts the search to one run.
 // The query image itself is excluded.
-func (s *Store) SimilarImages(targetID, phashVal, runID int64, maxDist, limit int) ([]Similar, error) {
-	q := "SELECT id, run_id, url, width, height, ext, saved_path, size_bytes, skipped, phash FROM images WHERE phash <> 0 AND skipped = '' AND id <> ?"
-	var args []any
-	args = append(args, targetID)
-	if runID > 0 {
+// SimilarImages finds images visually close to target. A pair must pass both
+// checks, because dHash alone is weak when aspect ratios differ:
+//   - aspect ratio within maxRatioDiff (relative, e.g. 0.25 = 25%)
+//   - max(horizontal, vertical) dHash distance <= maxDist
+//
+// scope "run" limits the search to the target's run, anything else searches all.
+func (s *Store) SimilarImages(target Image, maxDist, limit int, scope string) ([]Similar, error) {
+	q := "SELECT id, run_id, url, width, height, ext, saved_path, size_bytes, skipped, phash, vhash FROM images WHERE phash <> 0 AND skipped = '' AND id <> ?"
+	args := []any{target.ID}
+	if scope == "run" && target.RunID > 0 {
 		q += " AND run_id = ?"
-		args = append(args, runID)
+		args = append(args, target.RunID)
 	}
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	target := uint64(phashVal)
+
+	targetHash := uint64(target.Phash)
+	targetRatio := ratio(target.Width, target.Height)
 	var sims []Similar
 	for rows.Next() {
 		var im Image
-		if err := rows.Scan(&im.ID, &im.RunID, &im.URL, &im.Width, &im.Height, &im.Ext, &im.SavedPath, &im.SizeBytes, &im.Skipped, &im.Phash); err != nil {
+		if err := rows.Scan(&im.ID, &im.RunID, &im.URL, &im.Width, &im.Height, &im.Ext, &im.SavedPath, &im.SizeBytes, &im.Skipped, &im.Phash, &im.Vhash); err != nil {
 			return nil, err
 		}
-		d := phash.Hamming(target, uint64(im.Phash))
+		if targetRatio > 0 {
+			if r := ratio(im.Width, im.Height); r > 0 && math.Abs(r-targetRatio)/targetRatio > maxRatioDiff {
+				continue // different shape: not the same picture
+			}
+		}
+		d := phash.Hamming(targetHash, uint64(im.Phash))
+		if im.Vhash != 0 && target.Vhash != 0 {
+			if dv := phash.Hamming(uint64(target.Vhash), uint64(im.Vhash)); dv > d {
+				d = dv // both directions must agree
+			}
+		}
 		if d <= maxDist {
 			sims = append(sims, Similar{Image: im, Distance: d})
 		}
@@ -817,6 +838,18 @@ func (s *Store) SimilarImages(targetID, phashVal, runID int64, maxDist, limit in
 	return sims, nil
 }
 
+// maxRatioDiff is how much two aspect ratios may differ before images are no
+// longer considered the same picture.
+const maxRatioDiff = 0.25
+
+// ratio returns width/height, or 0 when unknown.
+func ratio(w, h int) float64 {
+	if w <= 0 || h <= 0 {
+		return 0
+	}
+	return float64(w) / float64(h)
+}
+
 func (s *Store) queryImages(q string, args ...any) ([]Image, error) {
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
@@ -826,7 +859,7 @@ func (s *Store) queryImages(q string, args ...any) ([]Image, error) {
 	var imgs []Image
 	for rows.Next() {
 		var im Image
-		if err := rows.Scan(&im.ID, &im.RunID, &im.URL, &im.Width, &im.Height, &im.Ext, &im.SavedPath, &im.SizeBytes, &im.Skipped, &im.Phash); err != nil {
+		if err := rows.Scan(&im.ID, &im.RunID, &im.URL, &im.Width, &im.Height, &im.Ext, &im.SavedPath, &im.SizeBytes, &im.Skipped, &im.Phash, &im.Vhash); err != nil {
 			return nil, err
 		}
 		imgs = append(imgs, im)

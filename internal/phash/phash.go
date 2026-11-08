@@ -30,6 +30,25 @@ func DHash(m image.Image) uint64 {
 	return h
 }
 
+// DHashVertical is the vertical twin of DHash: 8x9 grayscale, each pixel
+// compared with the one below. Requiring both hashes to match makes near
+// duplicates robust while cutting false positives from aspect-ratio distortion.
+func DHashVertical(m image.Image) uint64 {
+	dst := image.NewGray(image.Rect(0, 0, 8, 9))
+	draw.ApproxBiLinear.Scale(dst, dst.Bounds(), m, m.Bounds(), draw.Src, nil)
+	var h uint64
+	bit := 0
+	for x := 0; x < 8; x++ {
+		for y := 0; y < 8; y++ {
+			if dst.Pix[y*dst.Stride+x] > dst.Pix[(y+1)*dst.Stride+x] {
+				h |= 1 << bit
+			}
+			bit++
+		}
+	}
+	return h
+}
+
 // Hamming returns the number of differing bits between two hashes; 0 means
 // identical, and small values (<=10) usually mean visually similar images.
 func Hamming(a, b uint64) int {

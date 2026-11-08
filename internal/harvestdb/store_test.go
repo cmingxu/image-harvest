@@ -66,14 +66,18 @@ func TestSimilarImages(t *testing.T) {
 	}
 	// target 0b...1 ; near = 0b...10 (dist 2); far = all-ones (dist 63)
 	if err := s.InsertImages(runID, []Image{
-		{URL: "t", SavedPath: "r/001.jpg", Phash: 1},
-		{URL: "near", SavedPath: "r/002.jpg", Phash: 2},
-		{URL: "far", SavedPath: "r/003.jpg", Phash: -1},
+		{URL: "t", SavedPath: "r/001.jpg", Width: 800, Height: 600, Phash: 1},
+		{URL: "near", SavedPath: "r/002.jpg", Width: 1600, Height: 1200, Phash: 2},
+		{URL: "far", SavedPath: "r/003.jpg", Width: 800, Height: 600, Phash: -1},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	sims, err := s.SimilarImages(1, 1, runID, 5, 10)
+	target, err := s.GetImage(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sims, err := s.SimilarImages(*target, 5, 10, "run")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +86,11 @@ func TestSimilarImages(t *testing.T) {
 	}
 
 	// no match at distance 0 except the excluded target itself
-	sims, err = s.SimilarImages(2, 2, runID, 0, 10)
+	other, err := s.GetImage(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sims, err = s.SimilarImages(*other, 0, 10, "run")
 	if err != nil {
 		t.Fatal(err)
 	}

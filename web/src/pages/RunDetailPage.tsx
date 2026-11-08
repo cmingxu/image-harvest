@@ -55,6 +55,8 @@ export default function RunDetailPage() {
   const [selected, setSelected] = useState<Image | null>(null)
   const [similar, setSimilar] = useState<Similar[]>([])
   const [simLoading, setSimLoading] = useState(false)
+  const [simDistance, setSimDistance] = useState(10)
+  const [simScope, setSimScope] = useState<'all' | 'run'>('all')
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -81,17 +83,21 @@ export default function RunDetailPage() {
     return <p className="text-sm text-muted-foreground">Loading…</p>
   }
 
-  const openImage = (img: Image) => {
-    setSelected(img)
-    setSimilar([])
+  const loadSimilar = (img: Image, distance: number, scope: 'all' | 'run') => {
     setSimLoading(true)
-    fetch(`/api/images/${img.id}/similar`)
+    fetch(`/api/images/${img.id}/similar?distance=${distance}&scope=${scope}&limit=12`)
       .then((r) => r.json())
       .then((d) => {
         setSimilar(d.images ?? [])
         setSimLoading(false)
       })
       .catch(() => setSimLoading(false))
+  }
+
+  const openImage = (img: Image) => {
+    setSelected(img)
+    setSimilar([])
+    loadSimilar(img, simDistance, simScope)
   }
 
   return (
@@ -215,7 +221,41 @@ export default function RunDetailPage() {
               </div>
             </div>
 
-            <h3 className="mt-4 text-sm font-semibold">Similar images</h3>
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <h3 className="text-sm font-semibold">Similar images</h3>
+              <label className="flex items-center gap-1 text-xs text-muted-foreground">
+                match
+                <select
+                  className="h-7 rounded-md border bg-card px-1 text-xs text-foreground"
+                  value={simDistance}
+                  onChange={(e) => {
+                    const v = Number(e.target.value)
+                    setSimDistance(v)
+                    if (selected) loadSimilar(selected, v, simScope)
+                  }}
+                >
+                  <option value={4}>strict (≤4 bits)</option>
+                  <option value={8}>tight (≤8)</option>
+                  <option value={10}>default (≤10)</option>
+                  <option value={14}>loose (≤14)</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-1 text-xs text-muted-foreground">
+                scope
+                <select
+                  className="h-7 rounded-md border bg-card px-1 text-xs text-foreground"
+                  value={simScope}
+                  onChange={(e) => {
+                    const v = e.target.value as 'all' | 'run'
+                    setSimScope(v)
+                    if (selected) loadSimilar(selected, simDistance, v)
+                  }}
+                >
+                  <option value="all">all runs</option>
+                  <option value="run">this run</option>
+                </select>
+              </label>
+            </div>
             {simLoading ? (
               <p className="mt-2 text-sm text-muted-foreground">Loading…</p>
             ) : similar.length === 0 ? (

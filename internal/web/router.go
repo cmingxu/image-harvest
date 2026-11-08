@@ -136,8 +136,9 @@ func NewRouter(open Opener, out string, meta func() Meta) *gin.Engine {
 			return
 		}
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "12"))
-		maxDist, _ := strconv.Atoi(c.DefaultQuery("distance", "25"))
-		sims, err := store.SimilarImages(img.ID, img.Phash, img.RunID, maxDist, limit)
+		maxDist, _ := strconv.Atoi(c.DefaultQuery("distance", "10")) // 10/64 bits ≈ visually same
+		scope := c.DefaultQuery("scope", "all")
+		sims, err := store.SimilarImages(*img, maxDist, limit, scope)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
