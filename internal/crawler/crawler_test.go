@@ -182,6 +182,9 @@ func TestServiceSubdomain(t *testing.T) {
 // it lands at level 2 — after the probe ran — and is never fetched.
 // Uses *.localhost -> 127.0.0.1 to fake subdomains.
 func TestSubdomainProbe(t *testing.T) {
+	SetSubdomains(true) // this test is explicitly about subdomain handling
+	t.Cleanup(func() { SetSubdomains(false) })
+
 	var portB string
 	muxB := http.NewServeMux()
 	muxB.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
@@ -231,5 +234,55 @@ func TestSubdomainProbe(t *testing.T) {
 	// big.jpg + p.png; mail/login never crawled, blog/another never crawled
 	if res.Saved != 2 {
 		t.Fatalf("want 2 saved images, got %d", res.Saved)
+	}
+}
+
+// TestNoSubdomainEnumeration: with subdomains disabled (the default) links to
+// subdomains are not crawled, only the seed host is.
+func TestNoSubdomainEnumeration(t *testing.T) {
+	SetSubdomains(false)
+
+	var sub string
+	muxSub := http.NewServeMux()
+	muxSub.HandleFunc("/album", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<html><img src="/sub.jpg"></html>`)
+	})
+	muxSub.HandleFunc("/sub.jpg", func(w http.ResponseWriter, r *http.Request) { w.Write(jpegImg(t, 400, 300)) })
+	srvSub := httptest.NewUnstartedServer(muxSub)
+	lSub, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvSub.Listener = lSub
+	srvSub.Start()
+	defer srvSub.Close()
+	_, subPort, _ := net.SplitHostPort(lSub.Addr().String())
+	sub = "http://album.localhost:" + subPort + "/album"
+
+	muxA := http.NewServeMux()
+	muxA.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `<html><img src="/big.jpg"><a href="%s">album</a></html>`, sub)
+	})
+	muxA.HandleFunc("/big.jpg", func(w http.ResponseWriter, r *http.Request) { w.Write(jpegImg(t, 400, 300)) })
+	srvA := httptest.NewUnstartedServer(muxA)
+	lA, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvA.Listener = lA
+	srvA.Start()
+	defer srvA.Close()
+	_, portA, _ := net.SplitHostPort(lA.Addr().String())
+
+	dir := t.TempDir()
+	res, err := Run("http://localhost:"+portA, 2, 100, 100, 2, 50, 85, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Pages != 1 {
+		t.Fatalf("subdomain was crawled: pages = %d, want 1", res.Pages)
+	}
+	if res.Saved != 1 {
+		t.Fatalf("want only the seed page image, got %d saved", res.Saved)
 	}
 }

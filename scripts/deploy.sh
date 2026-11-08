@@ -40,6 +40,7 @@ DISCOVER_RETRY_AFTER=${DISCOVER_RETRY_AFTER:-336h}
 IMPORT_REFRESH=${IMPORT_REFRESH:-}             # set to 1 to re-download the list on import
 REQUEST_INTERVAL=${REQUEST_INTERVAL:-1s}       # min delay between HTTP requests
 DOMAIN_INTERVAL=${DOMAIN_INTERVAL:-10s}        # delay between domains while scraping
+SUBDOMAINS=${SUBDOMAINS:-0}                    # 1 = also crawl subdomains of the seed host
 SCRAPE=${SCRAPE:-0}                            # 1 = start the scraper service too
 LIST=${LIST:-https://s3-us-west-1.amazonaws.com/umbrella-static/top-1m.csv.zip}
 TIMER=${IMPORT_TIMER:-1}                        # install the daily import timer
@@ -155,6 +156,7 @@ DISCOVER_OFFSET=$DISCOVER_OFFSET
 PROBE_TIMEOUT=$PROBE_TIMEOUT
 REQUEST_INTERVAL=$REQUEST_INTERVAL
 DOMAIN_INTERVAL=$DOMAIN_INTERVAL
+SUBDOMAINS=$SUBDOMAINS
 LIST=$LIST
 IMPORT_REFRESH=$IMPORT_REFRESH
 EOF

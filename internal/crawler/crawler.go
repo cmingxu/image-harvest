@@ -148,6 +148,39 @@ func SetInterval(d time.Duration) {
 	reqMu.Unlock()
 }
 
+// --- crawl scope ----------------------------------------------------------
+
+var (
+	scopeMu sync.RWMutex
+	// off by default: crawling stays on the seed host and never enumerates
+	// subdomains (opt in with -subdomains)
+	allowSubdomains = false
+)
+
+// SetSubdomains controls whether the crawl follows links on subdomains of the
+// seed host (news.example.com) or stays on the host it started on.
+func SetSubdomains(allow bool) {
+	scopeMu.Lock()
+	allowSubdomains = allow
+	scopeMu.Unlock()
+}
+
+// Subdomains reports the current crawl scope.
+func Subdomains() bool {
+	scopeMu.RLock()
+	defer scopeMu.RUnlock()
+	return allowSubdomains
+}
+
+// inScope reports whether a link host may be crawled. With subdomains disabled
+// only the seed host itself (www. normalized) is followed.
+func inScope(host, seedHost string) bool {
+	if Subdomains() {
+		return sameSite(host, seedHost)
+	}
+	return strings.TrimPrefix(host, "www.") == seedHost
+}
+
 // Interval reports the current request pacing.
 func Interval() time.Duration {
 	reqMu.Lock()
@@ -214,6 +247,7 @@ func Get(u string) (*http.Response, error) {
 // skipped entirely, and a fresh subdomain whose first page has no links and
 // no images is marked dead and abandoned.
 func crawl(seed *url.URL, depth, workers, maxPages int) (pages int, imgs []string) {
+	seedHost := strings.TrimPrefix(seed.Hostname(), "www.")
 	visited := map[string]bool{seed.String(): true}
 	seenHost := map[string]bool{}
 	deadHosts := map[string]bool{}
@@ -250,6 +284,9 @@ func crawl(seed *url.URL, depth, workers, maxPages int) (pages int, imgs []strin
 					}
 				}
 				for _, l := range links {
+					if !inScope(hostOf(l), seedHost) {
+						continue
+					}
 					if !deadHosts[h] && !visited[l] {
 						visited[l] = true
 						next = append(next, l)
@@ -291,7 +328,7 @@ func FetchPage(u string) (links, imgs []string) {
 		if n.Type == html.ElementNode {
 			switch n.Data {
 			case "a":
-				if abs := resolve(base, attr(n, "href")); abs != nil && sameSite(abs.Hostname(), host) && !serviceSubdomain(abs.Hostname(), host) {
+				if abs := resolve(base, attr(n, "href")); abs != nil && inScope(abs.Hostname(), host) && !serviceSubdomain(abs.Hostname(), host) {
 					links = append(links, abs.String())
 				}
 			case "img":

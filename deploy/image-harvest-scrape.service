@@ -21,6 +21,7 @@ ExecStart=/bin/sh -c 'exec __APP_DIR__/bin/image-harvest -crawl-domains -require
   -depth "${DEPTH:-2}" -min "${MIN_RES:-1200x800}" -quality "${QUALITY:-92}" \
   -maxpages "${MAX_PAGES:-200}" -workers "${WORKERS:-2}" \
   -interval "${REQUEST_INTERVAL:-1s}" \
+  $( [ "${SUBDOMAINS:-0}" = "1" ] && echo -subdomains ) \
   -domain-interval "${DOMAIN_INTERVAL:-10s}" \
   ${CRAWL_LIMIT:+-crawl-limit "$CRAWL_LIMIT"}'
 Restart=always

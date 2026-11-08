@@ -42,8 +42,8 @@ The older network-probing mode is still available (`-discover`, which measures
 homepage image density and hi-res ratio into the same table) but is off by
 default.
 
-- BFS crawl, seed domain + subdomains; service subdomains (mail., api., …)
-  are skipped and content-free subdomains are abandoned after one probe page.
+- BFS crawl on the seed host only (`-subdomains` also follows subdomains;
+  service subdomains like mail./api. are skipped even then).
 - Saves to `out/YYYY-MM-DD-HH/`; records run + per-image metadata (URL,
   dimensions, size, skip reason, perceptual hash) in DuckDB.
 - `-rehash` backfills perceptual hashes for images from older runs.
@@ -74,7 +74,9 @@ bin/harvest-web -db harvest.duckdb -out .   # http://localhost:8080
 ```
 
 `image-harvest-scrape.service` crawls every imported domain that has no
-`last_crawled` mark, in rank order, and records each run in DuckDB:
+`last_crawled` mark, in rank order, and records each run in DuckDB. Crawling
+stays on the seed host: subdomains are **not** enumerated (`-subdomains` opts
+back in).
 
 | setting | default | meaning |
 |---|---|---|
@@ -83,6 +85,7 @@ bin/harvest-web -db harvest.duckdb -out .   # http://localhost:8080
 | `MIN_RES` | `1200x800` | smaller images are rejected before download |
 | `QUALITY` | `92` | JPEG quality for webp→jpg |
 | `DEPTH` / `MAX_PAGES` | `2` / `200` | crawl breadth per domain |
+| `SUBDOMAINS` | `0` | keep crawling on the seed host only (no subdomain enumeration) |
 
 Identical flags on the CLI:
 

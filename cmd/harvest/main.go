@@ -27,6 +27,7 @@ func main() {
 	out := flag.String("out", ".", "output directory")
 	quality := flag.Int("quality", 92, "JPEG quality for webp->jpg conversion")
 	interval := flag.Duration("interval", 0, "minimum delay between outgoing requests, e.g. 1s (0 = no pacing)")
+	subdomains := flag.Bool("subdomains", false, "follow links on subdomains of the seed host (default: stay on the seed host)")
 	domainInterval := flag.Duration("domain-interval", 0, "delay between finishing one domain and starting the next")
 	doCrawlDomains := flag.Bool("crawl-domains", false, "crawl every imported domain that has not been crawled yet (rank order), then keep going")
 	crawlLimit := flag.Int("crawl-limit", 0, "with -crawl-domains: stop after this many domains (0 = all)")
@@ -47,8 +48,9 @@ func main() {
 	discoverRetry := flag.Duration("discover-retry-after", 14*24*time.Hour, "re-probe a domain only after this long (0 = never re-probe)")
 	flag.Parse()
 
-	// request pacing applies to every mode that fetches over the network
+	// request pacing and crawl scope apply to every network-fetching mode
 	crawler.SetInterval(*interval)
+	crawler.SetSubdomains(*subdomains)
 
 	if *doCrawlDomains {
 		if err := crawlDomains(*dbPath, *out, *depth, *minRes, *quality, *maxPages, *workers, *crawlLimit, *interval, *domainInterval, *requireNetFS); err != nil {
